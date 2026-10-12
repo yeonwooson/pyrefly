@@ -39,11 +39,25 @@ impl MemoryFilesOverlay {
 pub struct MemoryFilesLookup<'a> {
     base: &'a MemoryFiles,
     overlay: &'a MemoryFilesOverlay,
+    filesystem_overlays: bool,
 }
 
 impl<'a> MemoryFilesLookup<'a> {
     pub fn new(base: &'a MemoryFiles, overlay: &'a MemoryFilesOverlay) -> Self {
-        Self { base, overlay }
+        Self {
+            base,
+            overlay,
+            filesystem_overlays: false,
+        }
+    }
+
+    pub fn with_filesystem_overlays(mut self, enabled: bool) -> Self {
+        self.filesystem_overlays = enabled;
+        self
+    }
+
+    pub fn filesystem_overlays(&self) -> bool {
+        self.filesystem_overlays
     }
 
     pub fn get(&self, path: &Path) -> Option<&'a Arc<FileContents>> {
@@ -51,5 +65,46 @@ impl<'a> MemoryFilesLookup<'a> {
             Some(contents) => contents.as_ref(), // Might be a None if deleted
             None => self.base.0.get(path),
         }
+    }
+}
+
+#[cfg(test)]
+mod filesystem_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_overlay_policy_is_opt_in_and_preserves_removal() {
+        let path = PathBuf::from("helper.py");
+        let mut base = MemoryFiles::default();
+        let mut initial = MemoryFilesOverlay::default();
+        initial.set(
+            path.clone(),
+            Some(Arc::new(FileContents::from_source(
+                "value: int = 1\n".to_owned(),
+            ))),
+        );
+        base.apply_overlay(initial);
+        let mut dirty = MemoryFilesOverlay::default();
+        dirty.set(
+            path.clone(),
+            Some(Arc::new(FileContents::from_source(
+                "value: str = 'x'\n".to_owned(),
+            ))),
+        );
+        let lookup = MemoryFilesLookup::new(&base, &dirty);
+        assert!(!lookup.filesystem_overlays());
+        let lookup = lookup.with_filesystem_overlays(true);
+        assert!(lookup.filesystem_overlays());
+        assert_eq!(
+            lookup.get(&path).unwrap().as_ref(),
+            &FileContents::from_source("value: str = 'x'\n".to_owned())
+        );
+        dirty.set(path.clone(), None);
+        assert!(
+            MemoryFilesLookup::new(&base, &dirty)
+                .with_filesystem_overlays(true)
+                .get(&path)
+                .is_none()
+        );
     }
 }
