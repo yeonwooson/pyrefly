@@ -212,6 +212,22 @@ fn test_class(module_name: ModuleName, name: &str) -> PyreflyClassType {
 }
 
 /// Holds an optional range resolver and drives recursive type conversion.
+fn with_tuple_flags(mut ty: TspType, flags: TypeFlags) -> TspType {
+    let current = match &mut ty {
+        TspType::BuiltInType(value) => &mut value.flags,
+        TspType::Declared(value) | TspType::Var(value) => &mut value.flags,
+        TspType::Function(value) => &mut value.flags,
+        TspType::Class(value) => &mut value.flags,
+        TspType::Union(value) => &mut value.flags,
+        TspType::Module(value) => &mut value.flags,
+        TspType::Overloaded(value) => &mut value.flags,
+        TspType::Synthesized(value) => &mut value.flags,
+        TspType::Reference(value) => &mut value.flags,
+    };
+    *current |= flags;
+    ty
+}
+
 struct TypeConverter<'a> {
     resolve_func_range: Option<&'a FuncRangeResolver<'a>>,
     resolve_module_path: Option<&'a ModulePathResolver<'a>>,
@@ -337,19 +353,37 @@ impl TypeConverter<'_> {
             // --- Tuples → ClassType for `tuple` with type args ---
             PyreflyType::Tuple(t) => {
                 let type_args = match t {
-                    pyrefly_types::tuple::Tuple::Concrete(elts) if !elts.is_empty() => {
+                    pyrefly_types::tuple::Tuple::Concrete(elts) => {
                         Some(elts.iter().map(|e| self.convert(e)).collect())
                     }
-                    pyrefly_types::tuple::Tuple::Unbounded(elem) => {
-                        Some(vec![self.convert(elem.as_ref())])
-                    }
+                    pyrefly_types::tuple::Tuple::Unbounded(elem) => Some(vec![with_tuple_flags(
+                        self.convert(elem.as_ref()),
+                        TypeFlags::UNBOUND,
+                    )]),
                     _ => None,
                 };
+                let declaration = self
+                    .resolve_export
+                    .and_then(|resolve| resolve(ModuleName::builtins(), &Name::new("tuple")))
+                    .map(|(module_path, range)| {
+                        Declaration::Regular(RegularDeclaration {
+                            category: DeclarationCategory::Class,
+                            kind: DeclarationKind::Regular,
+                            name: Some("tuple".to_owned()),
+                            node: Node {
+                                uri: path_to_uri(&module_path),
+                                range: lsp_range_to_tsp(range),
+                            },
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        Declaration::Synthesized(SynthesizedDeclaration {
+                            kind: DeclarationKind::Synthesized,
+                            uri: String::new(),
+                        })
+                    });
                 TspType::Class(TspClassType {
-                    declaration: Declaration::Synthesized(SynthesizedDeclaration {
-                        kind: DeclarationKind::Synthesized,
-                        uri: String::new(),
-                    }),
+                    declaration,
                     flags: TypeFlags::INSTANCE,
                     id: next_id(),
                     kind: TypeKind::Class,
@@ -2102,5 +2136,73 @@ mod tests {
             TspType::BuiltInType(b) => assert_eq!(b.name, "unknown"),
             other => panic!("expected BuiltInType, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod portable_tuple_tests {
+    use pyrefly_types::tuple::Tuple;
+    use pyrefly_types::types::AnyStyle;
+
+    use super::*;
+
+    #[test]
+    fn tuple_conversion_preserves_empty_fixed_and_unbounded_shapes() {
+        for count in [0, 1, 2] {
+            let input =
+                PyreflyType::Tuple(Tuple::Concrete(vec![
+                    PyreflyType::Any(AnyStyle::Explicit);
+                    count
+                ]));
+            let TspType::Class(output) = convert_type(&input) else {
+                panic!("Tuple must retain its class representation");
+            };
+            let arguments = output.type_args.expect("Concrete cardinality is explicit");
+            assert_eq!(arguments.len(), count);
+            assert!(arguments.iter().all(|arg| {
+                matches!(arg, TspType::BuiltInType(value) if !value.flags.contains(TypeFlags::UNBOUND))
+            }));
+            assert!(matches!(output.declaration, Declaration::Synthesized(_)));
+        }
+        let input = PyreflyType::Tuple(Tuple::Unbounded(Box::new(PyreflyType::Any(
+            AnyStyle::Explicit,
+        ))));
+        let TspType::Class(output) = convert_type(&input) else {
+            panic!("Unbounded tuple must retain its class representation");
+        };
+        let arguments = output.type_args.unwrap();
+        assert_eq!(arguments.len(), 1);
+        assert!(matches!(&arguments[0], TspType::BuiltInType(value)
+            if value.flags.contains(TypeFlags::UNBOUND)));
+    }
+
+    #[test]
+    fn tuple_declaration_uses_the_query_export_resolver() {
+        let stdlib = TestStdlib::new();
+        let resolve = |module: ModuleName, name: &Name| {
+            assert_eq!(module, ModuleName::builtins());
+            assert_eq!(name.as_str(), "tuple");
+            Some((
+                ModulePath::filesystem(PathBuf::from("builtins.pyi")),
+                lsp_types::Range::new(
+                    lsp_types::Position::new(7, 6),
+                    lsp_types::Position::new(7, 11),
+                ),
+            ))
+        };
+        let input = PyreflyType::Tuple(Tuple::Concrete(Vec::new()));
+        let TspType::Class(output) =
+            convert_type_with_resolvers(&input, None, None, Some(&resolve), stdlib.classes())
+        else {
+            panic!("Tuple must remain a class");
+        };
+        let Declaration::Regular(declaration) = output.declaration else {
+            panic!("Expected the real builtin declaration");
+        };
+        assert_eq!(declaration.name.as_deref(), Some("tuple"));
+        assert_eq!(declaration.node.range.start.line, 7);
+        assert_eq!(declaration.node.range.start.character, 6);
+        assert_eq!(declaration.node.range.end.character, 11);
+        assert_eq!(output.type_args.unwrap().len(), 0);
     }
 }
