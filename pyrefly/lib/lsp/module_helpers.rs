@@ -31,7 +31,17 @@ pub fn to_real_path(path: &ModulePath) -> Option<PathBuf> {
         ModulePathDetails::FileSystem(path)
         | ModulePathDetails::Memory(path)
         | ModulePathDetails::Namespace(path) => Some(path.to_path_buf()),
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_os = "wasi")]
+        ModulePathDetails::BundledTypeshed(path) => Some(PathBuf::from("/typeshed").join(&**path)),
+        #[cfg(target_os = "wasi")]
+        ModulePathDetails::BundledTypeshedThirdParty(path) => {
+            Some(PathBuf::from("/typeshed-third-party").join(&**path))
+        }
+        #[cfg(target_os = "wasi")]
+        ModulePathDetails::BundledThirdParty(path) => {
+            Some(PathBuf::from("/bundled-third-party").join(&**path))
+        }
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         ModulePathDetails::BundledTypeshed(_)
         | ModulePathDetails::BundledTypeshedThirdParty(_)
         | ModulePathDetails::BundledThirdParty(_) => None,

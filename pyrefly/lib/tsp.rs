@@ -5,7 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+mod import_name;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod requests;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod transaction_conversion;
 pub mod type_conversion;
