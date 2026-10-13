@@ -6,6 +6,7 @@
  */
 
 pub mod dirty;
+pub mod document;
 pub mod epoch;
 pub mod errors;
 pub mod ide;
@@ -22,3 +23,4 @@ pub mod semantic_tokens;
 pub mod state;
 pub mod steps;
 pub mod subscriber;
+pub mod transaction_manager;

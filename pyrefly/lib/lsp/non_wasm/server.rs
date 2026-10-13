@@ -343,6 +343,8 @@ use crate::lsp::wasm::provide_type::ProvideTypeParams;
 use crate::lsp::wasm::provide_type::ProvideTypeResponse;
 use crate::lsp::wasm::provide_type::provide_type;
 use crate::module::bundled::BundledStub;
+use crate::state::document::change_document;
+use crate::state::document::open_document;
 use crate::state::load::Load;
 use crate::state::load::LspFile;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
@@ -3693,8 +3695,13 @@ impl Server {
         } else {
             None
         };
-        self.version_info.lock().insert(path.clone(), version);
-        self.open_files.write().insert(path.clone(), contents);
+        open_document(
+            &self.open_files,
+            &self.version_info,
+            path.clone(),
+            version,
+            contents,
+        );
         self.queue_source_db_rebuild_and_recheck(telemetry, telemetry_event, false);
         if !subsequent_mutation {
             info!(
@@ -3746,20 +3753,13 @@ impl Server {
             );
         }
         drop(version_info);
-        let mut lock = self.open_files.write();
-        let Some(original) = lock.get_mut(&file_path) else {
-            return Err(anyhow::anyhow!(
-                "File not found in open_files: {}",
-                file_path.display()
-            ));
-        };
-        *original = Arc::new(LspFile::from_source(apply_change_events(
-            original.get_string(),
+        change_document(
+            &self.open_files,
+            &self.version_info,
+            &file_path,
+            version,
             params.content_changes,
-        )));
-        drop(lock);
-        // Update version_info only after the mutation has fully succeeded.
-        self.version_info.lock().insert(file_path.clone(), version);
+        )?;
         if !subsequent_mutation {
             info!(
                 "File {} changed, prepare to validate open files.",
