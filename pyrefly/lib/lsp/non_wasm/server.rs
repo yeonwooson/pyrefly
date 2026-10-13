@@ -250,6 +250,7 @@ use pyrefly_util::telemetry::TelemetryServerState;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use pyrefly_util::watch_pattern::WatchPattern;
+#[cfg(test)]
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -258,7 +259,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use tracing::debug;
@@ -271,7 +271,6 @@ use vec1::Vec1;
 use crate::ModuleInfo;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::binding::binding::KeyClassMro;
-use crate::binding::binding::KeyUndecoratedFunctionRange;
 use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::config::config::ConfigFile;
@@ -361,8 +360,7 @@ use crate::state::state::Transaction;
 use crate::state::subscriber::CompositeSubscriber;
 use crate::state::subscriber::PublishDiagnosticsSubscriber;
 use crate::state::subscriber::Subscriber;
-use crate::tsp::type_conversion::StdlibClasses;
-use crate::tsp::type_conversion::convert_type_with_resolvers;
+use crate::tsp::transaction_conversion::convert_type_in_transaction;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassType;
 
@@ -6582,53 +6580,7 @@ impl Server {
         source_handle: &Handle,
         ty: &pyrefly_types::types::Type,
     ) -> tsp_types::Type {
-        // A `Def` function's name range, looked up in its module's binding table.
-        // The handle reuses `source_handle`'s `SysInfo` (as `get_class_fields`
-        // does for cross-module lookups) so the function's module is found under
-        // the same `SysInfo` the transaction computed it with; re-deriving a
-        // config-default `SysInfo` would miss the module in a multi-`SysInfo`
-        // transaction and silently collapse the range to zero.
-        let resolve_func_range = |func_id: &pyrefly_types::callable::FuncId| {
-            let def_index = func_id.def_index?;
-            let handle = Handle::new(
-                func_id.module.name(),
-                func_id.module.path().dupe(),
-                source_handle.sys_info().dupe(),
-            );
-            let bindings = transaction.get_bindings(&handle)?;
-            let key = KeyUndecoratedFunctionRange(def_index);
-            let idx = bindings.key_to_idx_hashed_opt(Hashed::new(&key))?;
-            Some(bindings.get(idx).0.range())
-        };
-        // An importable module's backing filesystem path.
-        let resolve_module_path = |module: &pyrefly_types::module::ModuleType| {
-            let module_name = ModuleName::from_str(&module.to_string());
-            let finding = transaction
-                .import_handle(source_handle, module_name, None)
-                .finding()?;
-            let path = to_real_path(finding.path())?;
-            Some(path.canonicalize().unwrap_or(path))
-        };
-        // An exported symbol's original definition, following re-exports.
-        let resolve_export = |module_name: ModuleName, name: &Name| {
-            resolve_export_location(transaction, source_handle, module_name, name)
-        };
-        // Sentinel-like types (`None`, `TypeGuard`/`TypeIs`, `Size`/`Dim`) are
-        // encoded as the stdlib's version-aware classes. Computing `ty` already
-        // populated this transaction's `Stdlib`, so `get_stdlib` stays on the
-        // warm path (see the doc comment above).
-        let stdlib = transaction.get_stdlib(source_handle);
-        convert_type_with_resolvers(
-            ty,
-            Some(&resolve_func_range),
-            Some(&resolve_module_path),
-            Some(&resolve_export),
-            StdlibClasses {
-                none_type: stdlib.none_type(),
-                bool_type: stdlib.bool(),
-                int_type: stdlib.int(),
-            },
-        )
+        convert_type_in_transaction(transaction, source_handle, ty)
     }
 }
 
@@ -6642,17 +6594,19 @@ impl Server {
 /// re-deriving the handle from the module path would pick a config-derived
 /// `SysInfo` that was never computed, panicking in `get_stdlib` whenever the
 /// transaction holds more than one `SysInfo`.
+#[cfg(test)]
 pub(crate) fn resolve_export_location(
     transaction: &Transaction,
     source_handle: &Handle,
     module_name: ModuleName,
     name: &Name,
 ) -> Option<(ModulePath, lsp_types::Range)> {
-    let target_handle = transaction
-        .import_handle(source_handle, module_name, None)
-        .finding()?;
-    let (module, range) = transaction.lookup_export_location(&target_handle, name)?;
-    Some((module.path().dupe(), module.to_lsp_range(range)))
+    crate::tsp::transaction_conversion::resolve_export_location(
+        transaction,
+        source_handle,
+        module_name,
+        name,
+    )
 }
 
 impl TspInterface for Server {

@@ -7,5 +7,6 @@
 
 pub mod requests;
 pub mod server;
+pub mod transaction_conversion;
 pub mod type_conversion;
 pub mod validation;
