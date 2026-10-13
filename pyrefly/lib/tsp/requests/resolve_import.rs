@@ -17,12 +17,12 @@ use lsp_server::ResponseError;
 use lsp_types::Url;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
-use ruff_python_ast::name::Name;
 use tsp_types::protocol::ResolveImportParams;
 
 use crate::lsp::module_helpers::to_real_path;
 use crate::lsp::non_wasm::server::TspInterface;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
+use crate::tsp::import_name::resolve_module_name;
 use crate::tsp::server::TspConnection;
 use crate::tsp::validation::invalid_params_error;
 use crate::tsp::validation::parse_uri;
@@ -112,39 +112,6 @@ impl<T: TspInterface> TspConnection<T> {
 /// to resolve to an absolute module name. For example, if the source
 /// module is `a.b.c` and the import is `from ..foo import bar`
 /// (leading_dots=2, name_parts=["foo"]), the result is `a.foo`.
-fn resolve_module_name(
-    name_parts: &[String],
-    leading_dots: i32,
-    source_module: ModuleName,
-    is_init: bool,
-) -> Result<ModuleName, ResponseError> {
-    if leading_dots < 0 {
-        return Err(invalid_params_error("leadingDots must be non-negative"));
-    }
-
-    if leading_dots == 0 {
-        // Absolute import: name parts must be non-empty.
-        if name_parts.is_empty() {
-            return Err(invalid_params_error(
-                "nameParts must be non-empty for absolute imports",
-            ));
-        }
-        Ok(ModuleName::from_parts(name_parts))
-    } else {
-        // Relative import: resolve against the source module.
-        let suffix = if name_parts.is_empty() {
-            None
-        } else {
-            Some(Name::new(name_parts.join(".")))
-        };
-        source_module
-            .new_maybe_relative(is_init, leading_dots as u32, suffix.as_ref())
-            .ok_or_else(|| {
-                invalid_params_error("relative import level exceeds source module depth")
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
