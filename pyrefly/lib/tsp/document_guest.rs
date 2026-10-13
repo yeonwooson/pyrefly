@@ -482,6 +482,10 @@ impl DocumentGuest {
         {
             return Err(error(-32602, "Expected an in-bounds UTF-16 query range"));
         }
+        let typing_source = matches!(
+            path.to_str(),
+            Some("/typeshed/typing.pyi" | "/typeshed/typing_extensions.pyi")
+        );
         let handle = self.query_handle(path);
         let transaction = self.inner.state.transaction();
         let module = transaction
@@ -543,8 +547,24 @@ impl DocumentGuest {
                     | IdentifierContext::ImportedModule { .. } => 7,
                     _ => 1,
                 };
+                let is_special_form_class = category == 6
+                    && typing_source
+                    && source_category == 1
+                    && (range == identifier.identifier.range
+                        || Ast::locate_node(&ast, range.start()).into_iter().any(|node| {
+                            matches!(node, AnyNodeRef::StmtAnnAssign(stmt) if stmt.range() == range)
+                        }))
+                    && transaction
+                        .get_computed_type_at_range(&handle, identifier.identifier.range)
+                        .is_some_and(|ty| match ty {
+                            pyrefly_types::types::Type::SpecialForm(_) => true,
+                            pyrefly_types::types::Type::Type(inner) => {
+                                matches!(inner.as_ref(), pyrefly_types::types::Type::SpecialForm(_))
+                            }
+                            _ => false,
+                        });
                 if identifier.identifier.id.as_str() != name
-                    || category != source_category
+                    || (category != source_category && !is_special_form_class)
                     || !range.contains_range(identifier.identifier.range)
                 {
                     return Err(error(
