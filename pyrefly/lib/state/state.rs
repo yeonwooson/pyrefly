@@ -1876,6 +1876,7 @@ impl<'a> Transaction<'a> {
 
     fn memory_lookup<'b>(&'b self) -> MemoryFilesLookup<'b> {
         MemoryFilesLookup::new(&self.readable.memory, &self.data.memory_overlay)
+            .with_filesystem_overlays(self.data.state.filesystem_overlays)
     }
 
     fn get_cached_loader(&self, loader: &ArcId<ConfigFile>) -> Arc<LoaderFindCache> {
@@ -2380,7 +2381,10 @@ impl<'a> Transaction<'a> {
         for (path, contents) in files {
             if self.memory_lookup().get(&path) != contents.as_ref() {
                 self.data.memory_overlay.set(path.clone(), contents);
-                changed.insert(ModulePath::memory(path));
+                changed.insert(ModulePath::memory(path.clone()));
+                if self.data.state.filesystem_overlays {
+                    changed.insert(ModulePath::filesystem(path));
+                }
             }
         }
         self.stats.lock().set_memory_dirty = changed.len();
@@ -3257,6 +3261,7 @@ impl<'a> AsMut<Transaction<'a>> for CancellableTransaction<'a> {
 ///        but they will block committing.
 ///     2. During the committing of `Transaction`, all reads will be blocked.
 pub struct State {
+    filesystem_overlays: bool,
     threads: ThreadPool,
     uniques: UniqueFactory,
     config_finder: ConfigFinder,
@@ -3268,6 +3273,7 @@ pub struct State {
 impl State {
     pub fn new(config_finder: ConfigFinder, thread_count: ThreadCount) -> Self {
         Self {
+            filesystem_overlays: false,
             threads: ThreadPool::new(thread_count),
             uniques: UniqueFactory::new(),
             config_finder,
@@ -3279,6 +3285,11 @@ impl State {
 
     pub fn config_finder(&self) -> &ConfigFinder {
         &self.config_finder
+    }
+
+    pub(crate) fn use_filesystem_overlays(&mut self) {
+        assert_eq!(self.run_count.load(Ordering::Relaxed), 0);
+        self.filesystem_overlays = true;
     }
 
     /// Run `op` on the state's thread pool, which has an increased stack size.
