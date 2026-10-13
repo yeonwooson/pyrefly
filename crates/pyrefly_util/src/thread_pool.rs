@@ -11,7 +11,9 @@ use std::env;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
+#[cfg(not(target_os = "wasi"))]
 use human_bytes::human_bytes;
+#[cfg(not(target_os = "wasi"))]
 use tracing::debug;
 use tracing::info;
 
@@ -55,8 +57,8 @@ impl FromStr for ThreadCount {
 
 /// A WASM compatible thread-pool.
 pub struct ThreadPool(
-    // Will be None on WASM
-    Option<rayon::ThreadPool>,
+    // A Rayon field's drop glue retains pthread imports even when always None.
+    #[cfg(not(target_os = "wasi"))] Option<rayon::ThreadPool>,
 );
 
 impl ThreadPool {
@@ -76,6 +78,12 @@ impl ThreadPool {
         }
     }
 
+    #[cfg(target_os = "wasi")]
+    pub fn new(_count: ThreadCount) -> Self {
+        Self()
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     pub fn new(count: ThreadCount) -> Self {
         if cfg!(target_arch = "wasm32") || count == ThreadCount::Inline {
             // No pool: WASM can't spawn threads, and `Inline` deliberately runs
@@ -110,6 +118,12 @@ impl ThreadPool {
 
     /// Spawns `f` on the thread pool, or runs it directly if running single-threaded.
     /// Note that this will block the entire thread pool until the work is complete.
+    #[cfg(target_os = "wasi")]
+    pub fn spawn_many(&self, f: impl Fn() + Sync) {
+        f()
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     pub fn spawn_many(&self, f: impl Fn() + Sync) {
         match &self.0 {
             None => f(),
@@ -124,6 +138,12 @@ impl ThreadPool {
         }
     }
 
+    #[cfg(target_os = "wasi")]
+    pub fn async_spawn(&self, f: impl FnOnce() + Send + 'static) {
+        f()
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     pub fn async_spawn(&self, f: impl FnOnce() + Send + 'static) {
         match &self.0 {
             None => f(),
@@ -139,9 +159,59 @@ impl ThreadPool {
         OP: FnOnce() -> R + Send,
         R: Send,
     {
+        #[cfg(target_os = "wasi")]
+        {
+            op()
+        }
+        #[cfg(not(target_os = "wasi"))]
         match &self.0 {
             None => op(),
             Some(pool) => pool.install(op),
         }
+    }
+}
+
+#[cfg(test)]
+mod portable_pool_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use super::{ThreadCount, ThreadPool};
+
+    #[test]
+    fn inline_pool_executes_on_the_calling_thread() {
+        let pool = ThreadPool::new(ThreadCount::Inline);
+        let current = std::thread::current().id();
+        assert_eq!(pool.install(|| std::thread::current().id()), current);
+        let calls = Arc::new(AtomicUsize::new(0));
+        pool.spawn_many(|| {
+            assert_eq!(std::thread::current().id(), current);
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let completed = Arc::clone(&calls);
+        pool.async_spawn(move || {
+            assert_eq!(std::thread::current().id(), current);
+            completed.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_pool_still_dispatches_to_rayon() {
+        let pool = ThreadPool::new(ThreadCount::NumThreads(
+            std::num::NonZeroUsize::new(2).unwrap(),
+        ));
+        assert_ne!(
+            pool.install(|| std::thread::current().id()),
+            std::thread::current().id()
+        );
+        let calls = AtomicUsize::new(0);
+        pool.spawn_many(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
