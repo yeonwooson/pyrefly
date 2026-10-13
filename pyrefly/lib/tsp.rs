@@ -6,6 +6,7 @@
  */
 
 mod import_name;
+pub mod query_guest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod requests;
 #[cfg(not(target_arch = "wasm32"))]
