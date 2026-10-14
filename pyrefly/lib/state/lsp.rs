@@ -69,7 +69,9 @@ use crate::alt::answers::Index;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
+use crate::binding::binding::AnnotationTarget;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyAnnotation;
 use crate::config::error_kind::ErrorKind;
 use crate::error::suppress::detect_line_ending;
 use crate::export::exports::Export;
@@ -1350,6 +1352,61 @@ impl<'a> Transaction<'a> {
         position: TextSize,
     ) -> Option<Type> {
         self.get_type_at_impl_with_options(handle, position, false, false)
+    }
+
+    /// Resolve the original annotation, without substituting a flow-narrowed type.
+    pub fn get_declared_type_at(&self, handle: &Handle, position: TextSize) -> Option<Type> {
+        let definitions = self
+            .find_definition(
+                handle,
+                position,
+                FindPreference {
+                    resolve_call_dunders: false,
+                    disable_style_fallback: true,
+                    ..Default::default()
+                },
+            )
+            .ok()?;
+        if definitions.len() != 1 {
+            return None;
+        }
+        let definition = definitions.first();
+        let declaration_handle = Handle::new(
+            definition.module.name(),
+            definition.module.path().dupe(),
+            handle.sys_info().dupe(),
+        );
+        let bindings = self.get_bindings(&declaration_handle)?;
+        for index in bindings.keys::<KeyAnnotation>() {
+            if matches!(bindings.idx_to_key(index), KeyAnnotation::Annotation(id) if id.range() == definition.definition_range)
+            {
+                let annotation = self.get_answers(&declaration_handle)?.get_idx(index)?;
+                if matches!(
+                    annotation.target,
+                    AnnotationTarget::ArgsParam(_) | AnnotationTarget::KwargsParam(_)
+                ) {
+                    return self.get_type_at_preserving_declaration(
+                        &declaration_handle,
+                        definition.definition_range.start(),
+                    );
+                }
+                return annotation.annotation.ty.clone();
+            }
+        }
+        let identifier =
+            self.identifier_at(&declaration_handle, definition.definition_range.start())?;
+        if matches!(
+            identifier.context,
+            IdentifierContext::FunctionDef { .. }
+                | IdentifierContext::MethodDef { .. }
+                | IdentifierContext::ClassDef { .. }
+        ) {
+            return self.get_type_at_preserving_declaration(
+                &declaration_handle,
+                definition.definition_range.start(),
+            );
+        }
+        None
     }
 
     /// Computed type for the TSP `getComputedType` endpoint.
