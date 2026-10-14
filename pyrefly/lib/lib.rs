@@ -46,7 +46,6 @@ pub(crate) use report::pysa::pysa_report_capnp;
 mod solver;
 #[doc(hidden)]
 pub mod state;
-#[cfg(not(target_arch = "wasm32"))]
 mod stubgen;
 #[cfg(test)]
 mod test;

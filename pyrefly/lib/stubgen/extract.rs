@@ -18,6 +18,7 @@ use std::sync::Arc;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_types::callable::Callable;
@@ -25,6 +26,7 @@ use pyrefly_types::callable::Param;
 use pyrefly_types::callable::Params;
 use pyrefly_types::callable::Required;
 use pyrefly_types::display::TypeDisplayContext;
+use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_types::types::BoundMethodType;
 use pyrefly_types::types::Forallable;
 use pyrefly_types::types::Overload;
@@ -119,6 +121,151 @@ pub struct StubTypeAlias {
 pub struct ExtractConfig {
     pub include_private: bool,
     pub include_docstrings: bool,
+}
+
+/// Render a source-less callable without replacing source TypeVars with new bindings.
+pub(crate) fn extract_callable_stub(
+    transaction: &Transaction,
+    handle: &Handle,
+    callable: &Callable,
+) -> Option<ModuleStub> {
+    if handle.module().to_string() == "__unknown__" {
+        return None;
+    }
+    let mut imports = BTreeSet::new();
+    let mut names = HashMap::new();
+    let mut add_import = |module: ModuleName, name: &Name| {
+        if module.to_string() == "__unknown__" {
+            return false;
+        }
+        if let Some(previous) = names.insert(name.clone(), module) {
+            if previous != module {
+                return false;
+            }
+        }
+        imports.insert(format!("from {module} import {name}"));
+        true
+    };
+    let mut unsupported = |ty: &Type| {
+        ty.any(|part| match part {
+            Type::Quantified(q) | Type::QuantifiedValue(q) => {
+                q.identity().origin != QuantifiedOrigin::ScopedLegacy
+                    || !add_import(q.identity().module, &q.name)
+            }
+            Type::TypeVar(tv) => {
+                !tv.qname().parent().is_toplevel()
+                    || !add_import(tv.qname().module_name(), tv.qname().id())
+            }
+            Type::ClassType(class) => {
+                let cls = class.class_object();
+                !cls.qname().parent().is_toplevel() || !add_import(cls.module_name(), cls.name())
+            }
+            Type::ClassDef(cls) => {
+                !cls.qname().parent().is_toplevel() || !add_import(cls.module_name(), cls.name())
+            }
+            Type::Function(_)
+            | Type::Callable(_)
+            | Type::BoundMethod(_)
+            | Type::Overload(_)
+            | Type::Forall(_)
+            | Type::ParamSpec(_)
+            | Type::TypeVarTuple(_)
+            | Type::SelfType(_) => true,
+            _ => false,
+        })
+    };
+    if unsupported(&callable.ret) {
+        return None;
+    }
+    if let Params::List(params) = &callable.params {
+        if params
+            .items()
+            .iter()
+            .any(|param| unsupported(param.as_type()))
+        {
+            return None;
+        }
+    }
+    let bindings = transaction.get_bindings(handle)?;
+    let answers = transaction.get_answers(handle)?;
+    let ast = transaction.get_ast(handle)?;
+    let module_info = transaction.get_module_info(handle)?;
+    let config = ExtractConfig {
+        include_private: true,
+        include_docstrings: false,
+    };
+    let function_map = HashMap::new();
+    let dunder_all = resolve_dunder_all(&ast.body, &module_info);
+    let mut ctx = ExtractionContext {
+        bindings: &bindings,
+        answers: &answers,
+        module_info: &module_info,
+        config: &config,
+        uses_incomplete: false,
+        typing_imports: BTreeSet::new(),
+        function_map: &function_map,
+        dunder_all: &dunder_all,
+    };
+    let ret = format_type(&callable.ret, &mut ctx)?;
+    let target = match &callable.params {
+        Params::List(params)
+            if params
+                .items()
+                .iter()
+                .all(|p| matches!(p, Param::PosOnly(None, _, Required::Required))) =>
+        {
+            ctx.typing_imports.insert("Callable");
+            let types: Vec<String> = params
+                .items()
+                .iter()
+                .map(|p| format_type(p.as_type(), &mut ctx))
+                .collect::<Option<Vec<_>>>()?;
+            StubItem::Variable(StubVariable {
+                name: "__tsp_callable".to_owned(),
+                annotation: Some(format!("Callable[[{}], {ret}]", types.join(", "))),
+                value: None,
+            })
+        }
+        Params::List(params) => {
+            let mut stub_params = synthesized_params_to_stub(params.items(), &mut ctx);
+            for (index, param) in stub_params.iter_mut().enumerate() {
+                if param.name == "_" {
+                    param.name = format!("__tsp_arg_{index}");
+                }
+            }
+            StubItem::Function(StubFunction {
+                name: "__tsp_callable".to_owned(),
+                is_async: false,
+                type_params: None,
+                decorators: Vec::new(),
+                params: stub_params,
+                return_type: Some(ret),
+                docstring: None,
+            })
+        }
+        Params::Ellipsis => {
+            ctx.typing_imports.insert("Callable");
+            StubItem::Variable(StubVariable {
+                name: "__tsp_callable".to_owned(),
+                annotation: Some(format!("Callable[..., {ret}]")),
+                value: None,
+            })
+        }
+        _ => return None,
+    };
+    if ctx.uses_incomplete {
+        return None;
+    }
+    let mut items = imports
+        .into_iter()
+        .map(|text| StubItem::Import(StubImport { text }))
+        .collect::<Vec<_>>();
+    items.push(target);
+    Some(ModuleStub {
+        items,
+        uses_incomplete: ctx.uses_incomplete,
+        typing_imports: ctx.typing_imports,
+    })
 }
 
 /// Extract a `ModuleStub` from a type-checked module.

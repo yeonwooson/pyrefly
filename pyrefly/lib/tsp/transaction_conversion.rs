@@ -20,6 +20,8 @@ use crate::lsp::module_helpers::to_real_path;
 use crate::state::state::Transaction;
 use crate::tsp::type_conversion::StdlibClasses;
 use crate::tsp::type_conversion::convert_type_with_resolvers;
+#[cfg(target_arch = "wasm32")]
+use crate::tsp::type_conversion::{convert_type_with_resolvers_and_callables, next_id};
 
 /// Reuse the query's SysInfo and warm Stdlib for every declaration resolver.
 pub fn convert_type_in_transaction(
@@ -51,16 +53,60 @@ pub fn convert_type_in_transaction(
         resolve_export_location(transaction, source_handle, module_name, name)
     };
     let stdlib = transaction.get_stdlib(source_handle);
+    let classes = StdlibClasses {
+        none_type: stdlib.none_type(),
+        bool_type: stdlib.bool(),
+        int_type: stdlib.int(),
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        let resolve_callable = |callable: &pyrefly_types::callable::Callable| {
+            let stub = crate::stubgen::extract::extract_callable_stub(
+                transaction,
+                source_handle,
+                callable,
+            )?;
+            let content = crate::stubgen::emit::emit_stub(&stub);
+            let offset = content.find("__tsp_callable")?;
+            let offset = i32::try_from(content[..offset].encode_utf16().count()).ok()?;
+            let uri = lsp_types::Url::from_file_path(to_real_path(source_handle.path())?)
+                .ok()?
+                .to_string();
+            Some(tsp_types::Type::Synthesized(tsp_types::SynthesizedType {
+                flags: tsp_types::TypeFlags::CALLABLE,
+                id: next_id(),
+                kind: tsp_types::TypeKind::Synthesized,
+                metadata: tsp_types::SynthesizedTypeMetadata {
+                    module: tsp_types::ModuleType {
+                        flags: tsp_types::TypeFlags::NONE,
+                        id: next_id(),
+                        kind: tsp_types::TypeKind::Module,
+                        module_name: source_handle.module().to_string(),
+                        uri,
+                        type_alias_info: None,
+                    },
+                    primary_definition_offset: offset,
+                },
+                stub_content: content,
+                type_alias_info: None,
+            }))
+        };
+        return convert_type_with_resolvers_and_callables(
+            ty,
+            Some(&resolve_func_range),
+            Some(&resolve_module_path),
+            Some(&resolve_export),
+            classes,
+            Some(&resolve_callable),
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     convert_type_with_resolvers(
         ty,
         Some(&resolve_func_range),
         Some(&resolve_module_path),
         Some(&resolve_export),
-        StdlibClasses {
-            none_type: stdlib.none_type(),
-            bool_type: stdlib.bool(),
-            int_type: stdlib.int(),
-        },
+        classes,
     )
 }
 

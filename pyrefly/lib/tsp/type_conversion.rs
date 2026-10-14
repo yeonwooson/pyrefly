@@ -86,7 +86,7 @@ use crate::lsp::module_helpers::to_real_path;
 static NEXT_TYPE_ID: AtomicI32 = AtomicI32::new(1);
 
 /// Generate a fresh, unique type id.
-fn next_id() -> i32 {
+pub(super) fn next_id() -> i32 {
     NEXT_TYPE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -109,6 +109,8 @@ pub type ModulePathResolver<'a> =
 /// imported user functions and special functions like `typing.overload`).
 pub type ExportLocationResolver<'a> =
     dyn Fn(ModuleName, &Name) -> Option<(ModulePath, lsp_types::Range)> + 'a;
+
+pub type CallableResolver<'a> = dyn Fn(&Callable) -> Option<TspType> + 'a;
 
 /// The stdlib classes used to encode pyrefly types that would otherwise be
 /// emitted as off-spec `BuiltInType` sentinels: the protocol restricts
@@ -137,11 +139,30 @@ pub fn convert_type_with_resolvers<'a>(
     export_location_resolver: Option<&'a ExportLocationResolver<'a>>,
     stdlib: StdlibClasses<'a>,
 ) -> TspType {
+    convert_type_with_resolvers_and_callables(
+        ty,
+        func_range_resolver,
+        module_path_resolver,
+        export_location_resolver,
+        stdlib,
+        None,
+    )
+}
+
+pub fn convert_type_with_resolvers_and_callables<'a>(
+    ty: &PyreflyType,
+    func_range_resolver: Option<&'a FuncRangeResolver<'a>>,
+    module_path_resolver: Option<&'a ModulePathResolver<'a>>,
+    export_location_resolver: Option<&'a ExportLocationResolver<'a>>,
+    stdlib: StdlibClasses<'a>,
+    resolve_callable: Option<&'a CallableResolver<'a>>,
+) -> TspType {
     TypeConverter {
         resolve_func_range: func_range_resolver,
         resolve_module_path: module_path_resolver,
         resolve_export: export_location_resolver,
         stdlib,
+        resolve_callable,
     }
     .convert(ty)
 }
@@ -234,6 +255,7 @@ struct TypeConverter<'a> {
     resolve_export: Option<&'a ExportLocationResolver<'a>>,
     /// Stdlib classes used to encode sentinel-like types; see [`StdlibClasses`].
     stdlib: StdlibClasses<'a>,
+    resolve_callable: Option<&'a CallableResolver<'a>>,
 }
 
 impl TypeConverter<'_> {
@@ -561,6 +583,11 @@ impl TypeConverter<'_> {
     /// reconstruct the signature; a synthesized callable has no source
     /// declaration, so this is the only channel for its parameter types.
     fn convert_callable(&self, callable: &Callable) -> TspType {
+        if let Some(resolve) = self.resolve_callable
+            && let Some(converted) = resolve(callable)
+        {
+            return converted;
+        }
         let ret = self.convert(&callable.ret);
         let specialized_types = self.specialized_types(callable, &ret);
         TspType::Function(TspFunctionType {
@@ -1036,10 +1063,14 @@ fn make_typevar_declared(qname: &pyrefly_python::qname::QName) -> DeclaredType {
     let uri = path_to_uri(module_path);
     let range = qname.range();
     let lsp_range = qname.module().to_lsp_range(range);
+    #[cfg(target_arch = "wasm32")]
+    let category = DeclarationCategory::Variable;
+    #[cfg(not(target_arch = "wasm32"))]
+    let category = DeclarationCategory::Typeparam;
 
     DeclaredType {
         declaration: Declaration::Regular(RegularDeclaration {
-            category: DeclarationCategory::Typeparam,
+            category,
             kind: DeclarationKind::Regular,
             name: Some(qname.id().to_string()),
             node: Node {
