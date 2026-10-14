@@ -2,6 +2,7 @@
 
 [package]
 name = "pyrefly"
+default-run = "pyrefly"
 version = "1.2.0"
 authors = ["Meta"]
 edition = "2024"
@@ -15,6 +16,10 @@ path = "lib/lib.rs"
 [[bin]]
 name = "pyrefly"
 path = "bin/main.rs"
+
+[[bin]]
+name = "pyrefly-wasi-query"
+path = "bin/wasi_query.rs"
 
 [[test]]
 name = "pyrefly_laziness_tests"
