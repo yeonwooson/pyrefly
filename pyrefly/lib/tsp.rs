@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+pub mod document_guest;
 mod import_name;
 pub mod query_guest;
 #[cfg(not(target_arch = "wasm32"))]
