@@ -4,6 +4,13 @@ Benchmarking scripts for comparing pyrefly against other Python type checkers.
 
 Ported from https://github.com/lolpack/type_coverage_py
 
+## WASI Placement Benchmark
+
+The [standalone WASI benchmark](wasi/README.md) compares real Pyrefly in a
+Node Worker with main-thread JavaScript Promise Integration (JSPI). It measures
+edit-to-type latency and driving-thread timer delay on deterministic public
+Python fixtures, without an editor or Pylance dependency.
+
 ## Type Checking Speed Benchmark
 
 Measures wall-clock execution time and peak memory usage of type checkers
