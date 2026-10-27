@@ -111,15 +111,15 @@ npm run bench --prefix scripts/benchmark/wasi -- --output target/wasi-repro-run-
 All durations are milliseconds; runs are shown separately, not pooled.
 
 | Run | Workload | Placement | Edit-to-type median | Edit-to-type p95 | Loop-delay median | Loop-delay p95 |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| 003 | shared | Worker | 68.946 | 75.236 | 9.591 | 18.032 |
-| 003 | shared | JSPI | 63.209 | 70.903 | 52.595 | 59.993 |
-| 003 | compute | Worker | 10.857 | 12.500 | 10.953 | 14.949 |
-| 003 | compute | JSPI | 10.958 | 13.506 | 7.041 | 14.374 |
-| 004 | shared | Worker | 67.150 | 71.106 | 10.139 | 12.853 |
-| 004 | shared | JSPI | 66.595 | 77.636 | 56.130 | 67.113 |
-| 004 | compute | Worker | 10.127 | 12.691 | 8.529 | 15.016 |
-| 004 | compute | JSPI | 9.835 | 11.903 | 7.406 | 13.708 |
+| --- | -------- | --------- | ------------------: | ---------------: | ----------------: | -------------: |
+| 003 | shared   | Worker    |              68.946 |           75.236 |             9.591 |         18.032 |
+| 003 | shared   | JSPI      |              63.209 |           70.903 |            52.595 |         59.993 |
+| 003 | compute  | Worker    |              10.857 |           12.500 |            10.953 |         14.949 |
+| 003 | compute  | JSPI      |              10.958 |           13.506 |             7.041 |         14.374 |
+| 004 | shared   | Worker    |              67.150 |           71.106 |            10.139 |         12.853 |
+| 004 | shared   | JSPI      |              66.595 |           77.636 |            56.130 |         67.113 |
+| 004 | compute  | Worker    |              10.127 |           12.691 |             8.529 |         15.016 |
+| 004 | compute  | JSPI      |               9.835 |           11.903 |             7.406 |         13.708 |
 
 The shared-import fixture shows larger main-thread timer stalls in both
 repetitions. The smaller fixture does not establish a consistent latency
