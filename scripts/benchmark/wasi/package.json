@@ -1,0 +1,12 @@
+{
+  "name": "pyrefly-wasi-placement-benchmark",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "node --experimental-wasm-jspi benchmark.mjs",
+    "test": "node --experimental-wasm-jspi --test benchmark.test.mjs"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2"
+  }
+}
