@@ -1,11 +1,25 @@
-# Pyrefly WASI: Worker versus main-thread JSPI
+# Pyrefly WASI benchmarks
+
+This suite provides two separate comparisons using one public guest build,
+fixture generator, framed protocol, and in-memory WASI runtime:
+
+| Command                | Question                                                                                | Workload                              |
+| ---------------------- | --------------------------------------------------------------------------------------- | ------------------------------------- |
+| `npm run bench`        | Worker versus main-thread JSPI: does placement affect latency or driving-thread stalls? | Exact fresh types after unsaved edits |
+| `npm run bench:native` | How does normal native Pyrefly compare with the WASI Worker, including OS resources?    | Unchanged saved-file type queries     |
+
+Run npm commands with `--prefix scripts/benchmark/wasi` from the repository root.
+Results from the two comparisons have different workloads and timing boundaries;
+do not combine their distributions.
+
+## Worker versus main-thread JSPI
 
 Run the same real Pyrefly command and generated Python projects in a Node
 Worker and on the driving thread using JavaScript Promise Integration (JSPI).
 No Pylance, editor, private source, Python environment, or native Pyrefly
 installation is used.
 
-## Run
+### Run
 
 Use this public branch, which contains the persistent `pyrefly-wasi-query`
 command. Upstream Pyrefly `main` does not provide that command.
@@ -47,7 +61,7 @@ These commands also work in PowerShell; paths can use backslashes.
 Set the SDK path with `$env:WASI_SDK_PATH = 'C:\path\to\wasi-sdk'` in
 PowerShell, or `export WASI_SDK_PATH=/path/to/wasi-sdk` in a POSIX shell.
 
-## Workloads and measurements
+### Workloads and measurements
 
 - **shared:** 1,024 small modules import a shared `seed`; the entry point
   imports all modules.
@@ -91,6 +105,105 @@ private code; they do not have the same source contents as an editor
 integration benchmark. There is no ambient-load matching or causal speedup
 threshold, and small-sample p95 may simply be the maximum. Re-run on the
 same hardware before comparing distributions, and retain unfavorable runs.
+
+## Native versus WASI saved-file baseline
+
+Use the same checkout and prerequisites above. Python 3.10 or later is also
+required for resource collection; no Python packages or interpreter-based
+analysis environment are installed. This command builds both native binaries
+and the WASI guest from this checkout with the same locked Cargo dependencies:
+
+```sh
+npm run bench:native --prefix scripts/benchmark/wasi -- --output target/native-wasi-sampled
+npm run bench:native --prefix scripts/benchmark/wasi -- --output target/native-wasi-unsampled --no-sample
+```
+
+`CARGO_TARGET_DIR` is honored by both comparisons. Repeated commands reuse the
+normal Cargo cache but still validate/build their own outputs; there are no
+external binary overrides. Use a fresh output directory for each attempt.
+Suite source hashes are frozen before building and checked again before and
+after measurement. Do not edit the suite while a run is in progress.
+For a smaller correctness check:
+
+```sh
+npm run bench:native --prefix scripts/benchmark/wasi -- --blocks 1 --samples 2 --size 3 --no-sample --output target/native-wasi-smoke
+npm run test:resources --prefix scripts/benchmark/wasi
+```
+
+The default schedule rotates three configurations through each ordering position:
+
+1. Normal native TSP with automatic Rayon thread selection.
+2. Normal native TSP with `--threads 1`, one Rayon worker, **not inline**.
+3. The same in-memory WASI Worker used by the placement comparison, inside a
+   dedicated Node child process so its full host footprint can be observed.
+
+The public native CLI does not expose a verified inline mode. No engine, Rust
+guest, or TSP protocol changes are needed for this comparison.
+
+`--size` defaults to 20 shared-import modules, plus `shared.py` and `app.py`
+(22 Python files total). All modules are imported. The fixture is generated
+by the placement benchmark's existing generator, but the saved-file baseline
+does not edit it: every query must return the exact `Literal[0]` class instance,
+with a real builtin source declaration. Both arms use Python 3.14/Linux
+analysis settings. Native reads saved disk files; the Worker reads the same
+source bytes in the suite's in-memory filesystem. That filesystem and the
+different native/portable dispatchers are part of the comparison, not isolated
+WebAssembly or process-transport overhead.
+
+The fixture imports module values without otherwise using them. Native's
+`unused-import` hints (LSP severity 4) are expected and retained in the wire
+log. Errors, warnings, and every other diagnostic fail the run. The placement
+comparison's existing diagnostic checks are unchanged.
+
+Each arm gets three fresh sessions by default (`--blocks`), two warmups after
+the first correct query, and ten warm requests (`--samples`). Nothing is
+trimmed or retried into success. Both configurations' standard-library archive
+files and bytes are checked against the paired build's exported stubs;
+native's generated `pyrefly.toml` analysis configuration is excluded explicitly.
+Orderly shutdown, correlated requests, immutable fixtures, process exit, and
+the WASI Worker's matching logical ready/retired identity are required.
+
+### Native timing and resource boundaries
+
+- Each query clock covers `getSnapshot` through the decoded computed-type
+  response. Individual snapshot and type-request times are also retained.
+  Answer assertions and result-file writes are outside this query clock.
+- Spawn, initialization, first-correct result, warm requests, and shutdown are
+  separate. Builds and fixture creation are outside the backend clock.
+  Launch-to-first-correct includes the sampler readiness barrier when enabled;
+  compare a separate `--no-sample` output before interpreting that value.
+- The WASI child compiles the guest and forwards requests to the existing
+  Worker host. Its extra stdio/Worker forwarding and allocations are included.
+  This is not a native-versus-WASI-in-the-same-process experiment.
+- The standard-library-only Python collector samples the creation-bound
+  backend process and observed descendants every 100 ms on Windows and Linux.
+  macOS resources are explicitly `NOT_MEASURED`, not zero. Only Windows ARM64
+  has been exercised end to end; other platform qualification remains open.
+- Raw observations include process/thread creation identities, initial/peak/
+  final thread counts, per-thread CPU intervals, process/tree CPU, and RSS.
+  Node/V8/Worker and other support threads count too; OS thread count is not
+  analysis-pool size or proof of CPU utilization.
+- One-core-equivalent utilization is observed CPU seconds / observation wall
+  seconds \* 100. Machine-normalized utilization divides that by logical CPUs.
+  CPU is whole-session host footprint, not exclusive query or Rust CPU.
+- Short-lived processes/threads can be missed; inaccessible observations are
+  retained. Counters can be coarse, and a zero observed CPU delta does not
+  prove a thread never ran. Logical Worker IDs are not OS thread IDs.
+- RSS peaks are sampled, not continuously observed maxima. Power is
+  `NOT_MEASURED`. Neither command reserves the machine or establishes cold
+  caches; avoid concurrent benchmarks/builds. Sampling itself has overhead.
+
+The output contains a fresh `results.json` with the schedule, source/code/
+lockfile and artifact hashes, toolchains, exact answers, all session outcomes
+and resource summaries. Each session retains decoded `wire.json`,
+`result.json`, and, when enabled, raw `resources.json`. Incorrect answers and
+resource/cleanup failures are explicit failures, not empty successful samples.
+
+The native saved-file command deliberately does not claim unsaved-edit parity.
+The pinned native TSP path has an observed stale cross-module dependency type
+after an unsaved edit. The placement command still requires every exact new
+literal after edits; that freshness test is unchanged. Do not compare its
+edit-to-type timings with saved-file cached-query timings.
 
 ## Reference observations: 2026-10-26
 

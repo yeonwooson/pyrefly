@@ -4,7 +4,6 @@
 // LICENSE file in the root directory of this source tree.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -16,7 +15,8 @@ import { isMainThread, parentPort, threadId, Worker, workerData } from "node:wor
 
 import { File, OpenFile, PreopenDirectory, WASI, WASIProcExit } from "@bjorn3/browser_wasi_shim";
 
-const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+import { buildArtifacts, command, ROOT, suiteHashes } from "./build.mjs";
+
 const MAX_FRAME = 1024 * 1024;
 const TIMEOUT = 120_000;
 const WORKLOADS = [
@@ -27,7 +27,7 @@ const WORKLOADS = [
 /** Decode the command's Content-Length frames, including fragmented writes. */
 export function frameReader(receive) {
   let buffered = Buffer.alloc(0);
-  return (bytes) => {
+  const read = (bytes) => {
     buffered = Buffer.concat([buffered, bytes]);
     while (buffered.length) {
       const end = buffered.indexOf("\r\n\r\n");
@@ -46,6 +46,8 @@ export function frameReader(receive) {
       receive(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
     }
   };
+  read.end = () => assert.equal(buffered.length, 0, "Truncated response frame");
+  return read;
 }
 
 /** Generate public, deterministic fixtures; no Python packages are installed. */
@@ -384,26 +386,9 @@ async function main() {
   for (const key of ["samples", "blocks"]) {
     assert(/^[1-9][0-9]*$/.test(values[key]) && Number(values[key]) <= 1000, `${key} must be an integer in 1..1000`);
   }
-  const command = (name, args) => execFileSync(name, args, { cwd: ROOT, encoding: "utf8" }).trim();
-  const sdk = process.env.WASI_SDK_PATH;
-  assert(sdk && path.isAbsolute(sdk), "Set WASI_SDK_PATH to an absolute public WASI SDK installation path");
-  const extension = process.platform === "win32" ? ".exe" : "";
-  const clang = path.join(sdk, "bin", `clang${extension}`);
-  const buildEnv = {
-    ...process.env,
-    WASI_SYSROOT: path.join(sdk, "share", "wasi-sysroot"),
-    CC_wasm32_wasip1: clang,
-    AR_wasm32_wasip1: path.join(sdk, "bin", `llvm-ar${extension}`),
-  };
-  execFileSync(
-    "cargo",
-    ["build", "--locked", "--release", "--target", "wasm32-wasip1", "--bin", "pyrefly-wasi-query"],
-    { cwd: ROOT, env: buildEnv, stdio: "inherit" }
-  );
-  const metadata = JSON.parse(command("cargo", ["metadata", "--no-deps", "--format-version", "1"]));
-  const bytes = await readFile(
-    path.join(metadata.target_directory, "wasm32-wasip1", "release", "pyrefly-wasi-query.wasm")
-  );
+  const inputHashes = await suiteHashes();
+  const { bytes, tools } = await buildArtifacts();
+  assert.deepEqual(await suiteHashes(), inputHashes, "Suite inputs changed during build");
   const module = await WebAssembly.compile(bytes);
   const output = path.resolve(ROOT, values.output ?? path.join("target", `wasi-placement-${Date.now()}`));
   await mkdir(output, { recursive: false });
@@ -412,12 +397,16 @@ async function main() {
     status: "running",
     startedAt: new Date().toISOString(),
     sourceRevision: command("git", ["rev-parse", "HEAD"]),
+    suiteHashes: inputHashes,
     guestSha256: createHash("sha256").update(bytes).digest("hex"),
     lockSha256: createHash("sha256")
       .update(await readFile(path.join(ROOT, "Cargo.lock")))
       .digest("hex"),
     scriptSha256: createHash("sha256")
       .update(await readFile(fileURLToPath(import.meta.url)))
+      .digest("hex"),
+    buildScriptSha256: createHash("sha256")
+      .update(await readFile(new URL("build.mjs", import.meta.url)))
       .digest("hex"),
     npmLockSha256: createHash("sha256")
       .update(await readFile(new URL("package-lock.json", import.meta.url)))
@@ -429,9 +418,7 @@ async function main() {
       arch: process.arch,
       cpu: os.cpus()[0].model,
       logicalCpus: os.cpus().length,
-      rustc: command("rustc", ["--version"]),
-      cargo: command("cargo", ["--version"]),
-      clang: command(clang, ["--version"]).split(/\r?\n/)[0],
+      ...tools,
     },
     boundary:
       "didChange through getSnapshot and validated getComputedType; 10 ms driving-thread timer drift through the first post-sequence drain tick",
@@ -467,6 +454,7 @@ async function main() {
         });
       }
     }
+    assert.deepEqual(await suiteHashes(), inputHashes, "Suite inputs changed during measurement");
     report.status = "passed";
     console.table(
       report.summary.map((s) => ({

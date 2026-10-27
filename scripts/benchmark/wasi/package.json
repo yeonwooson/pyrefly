@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "bench": "node --experimental-wasm-jspi benchmark.mjs",
-    "test": "node --experimental-wasm-jspi --test benchmark.test.mjs"
+    "bench:native": "node native.mjs",
+    "test": "node --experimental-wasm-jspi --test benchmark.test.mjs native.test.mjs",
+    "test:resources": "python resources_test.py"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "0.4.2"
