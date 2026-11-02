@@ -6,6 +6,11 @@
  */
 
 //! Persistent WASIp1 command: bounded stdio JSON-RPC around real Pyrefly queries.
+//!
+//! No arguments and `--shared-documents` both select the document backend.
+//! `--shared-documents --explicit-root-count N` keeps the workspace/user prefix
+//! explicit and places remaining captured roots in the interpreter-library tier.
+//! Omitting the count preserves the legacy all-explicit root precedence.
 
 use std::io;
 use std::io::BufRead;
@@ -160,17 +165,75 @@ fn export_typeshed(directory: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn query_options(args: &[String]) -> anyhow::Result<(bool, Option<usize>)> {
+    let (shared, count) = match args {
+        [] => return Ok((false, None)),
+        [mode] if mode == "--shared-documents" => return Ok((true, None)),
+        [flag, count] if flag == "--explicit-root-count" => (false, count),
+        [mode, flag, count] if mode == "--shared-documents" && flag == "--explicit-root-count" => {
+            (true, count)
+        }
+        _ => anyhow::bail!(
+            "Expected [--shared-documents] [--explicit-root-count 1..32], or --export-typeshed <directory>"
+        ),
+    };
+    let count: usize = count.parse()?;
+    if !(1..=32).contains(&count) {
+        anyhow::bail!("Explicit root count must be between 1 and 32");
+    }
+    Ok((shared, Some(count)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_options;
+
+    fn options(args: &[&str]) -> anyhow::Result<(bool, Option<usize>)> {
+        query_options(
+            &args
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn private_root_count_accepts_legacy_and_role_aware_modes() {
+        assert_eq!(options(&[]).unwrap(), (false, None));
+        assert_eq!(options(&["--shared-documents"]).unwrap(), (true, None));
+        assert_eq!(
+            options(&["--explicit-root-count", "1"]).unwrap(),
+            (false, Some(1))
+        );
+        assert_eq!(
+            options(&["--shared-documents", "--explicit-root-count", "32"]).unwrap(),
+            (true, Some(32)),
+        );
+    }
+
+    #[test]
+    fn private_root_count_rejects_malformed_or_unsupported_options() {
+        for args in [
+            vec!["--explicit-root-count"],
+            vec!["--explicit-root-count", "0"],
+            vec!["--explicit-root-count", "33"],
+            vec!["--explicit-root-count", "-1"],
+            vec!["--explicit-root-count", "1.5"],
+            vec!["--explicit-root-count", "x"],
+            vec!["--explicit-root-count", "1", "--shared-documents"],
+            vec!["--shared-documents", "--unexpected", "1"],
+        ] {
+            assert!(options(&args).is_err(), "{args:?}");
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--export-typeshed" {
         return export_typeshed(Path::new(&args[2]));
     }
-    let shared = args.len() == 2 && args[1] == "--shared-documents";
-    if args.len() > 1 && !shared {
-        anyhow::bail!(
-            "Expected no arguments (document session), --shared-documents, or --export-typeshed <directory>"
-        );
-    }
+    let (_shared, explicit_root_count) = query_options(&args[1..])?;
     let mut input = io::BufReader::new(io::stdin().lock());
     let mut output = io::stdout().lock();
     let mut guest = None;
@@ -212,7 +275,13 @@ fn main() -> anyhow::Result<()> {
         }
         let arguments = value.get("params").cloned().unwrap_or(Value::Null);
         let old = guest.as_ref().map(Backend::snapshot);
-        let result = dispatch(method, arguments, &mut guest, &mut shutdown);
+        let result = dispatch(
+            method,
+            arguments,
+            &mut guest,
+            &mut shutdown,
+            explicit_root_count,
+        );
         if result.is_err()
             && matches!(
                 method,
@@ -256,6 +325,7 @@ fn dispatch(
     arguments: Value,
     guest: &mut Option<Backend>,
     shutdown: &mut bool,
+    explicit_root_count: Option<usize>,
 ) -> Result<Value, ResponseError> {
     if *shutdown {
         return Err(error(-32600, "Server has shut down"));
@@ -270,6 +340,7 @@ fn dispatch(
         *guest = Some(Backend::Documents(DocumentGuest::new(
             root_uri,
             initialize.initialization_options,
+            explicit_root_count,
         )?));
         return serialize(InitializeResult {
             capabilities: {

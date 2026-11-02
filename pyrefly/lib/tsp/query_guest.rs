@@ -39,6 +39,8 @@ struct InitializationOptions {
 
 pub struct QueryGuest {
     pub(super) config: ArcId<ConfigFile>,
+    pub(super) captured_roots: Vec<PathBuf>,
+    pub(super) explicit_root_count: Option<usize>,
     pub(super) state: State,
     pub(super) snapshot: i32,
 }
@@ -47,6 +49,7 @@ impl QueryGuest {
     pub fn new(
         root_uri: Option<Url>,
         initialization_options: Option<Value>,
+        explicit_root_count: Option<usize>,
     ) -> Result<Self, ResponseError> {
         let root_uri = root_uri.ok_or_else(|| error(-32602, "initialize.rootUri is required"))?;
         let root = local_path(&root_uri)?;
@@ -104,7 +107,7 @@ impl QueryGuest {
         config.python_environment.python_version = Some(PythonVersion::new(major, minor, micro));
         config.python_environment.python_platform =
             Some(PythonPlatform::new(&options.python_platform));
-        config.search_path_from_args = roots;
+        configure_search_roots(&mut config, &roots, explicit_root_count)?;
         config.disable_search_path_heuristics = true;
         if !config.configure().is_empty() {
             return Err(error(
@@ -114,8 +117,10 @@ impl QueryGuest {
         }
         let config = ArcId::new(config);
         Ok(Self {
-            state: State::new(saved_config_finder(&config), ThreadCount::Inline),
+            state: State::new(saved_config_finder(&config, &roots), ThreadCount::Inline),
             config,
+            captured_roots: roots,
+            explicit_root_count,
             snapshot: 0,
         })
     }
@@ -125,9 +130,28 @@ impl QueryGuest {
     }
 }
 
-fn saved_config_finder(config: &ArcId<ConfigFile>) -> ConfigFinder {
-    let roots: Vec<_> = config
-        .search_path_from_args
+fn configure_search_roots(
+    config: &mut ConfigFile,
+    roots: &[PathBuf],
+    explicit_root_count: Option<usize>,
+) -> Result<(), ResponseError> {
+    let count = explicit_root_count.unwrap_or(roots.len());
+    if count == 0 || count > roots.len() || roots.len() > MAX_SEARCH_ROOTS {
+        return Err(error(
+            -32602,
+            "Explicit root count must be between 1 and the captured root count",
+        ));
+    }
+    config.search_path_from_args = roots[..count].to_vec();
+    if explicit_root_count.is_some() {
+        // Interpreter sources must not outrank typeshed or user overrides.
+        config.python_environment.site_package_path = Some(roots[count..].to_vec());
+    }
+    Ok(())
+}
+
+fn saved_config_finder(config: &ArcId<ConfigFile>, captured_roots: &[PathBuf]) -> ConfigFinder {
+    let roots: Vec<_> = captured_roots
         .iter()
         .map(|root| {
             let mut scoped = ConfigFile::clone(config);
@@ -157,6 +181,51 @@ fn saved_config_finder(config: &ArcId<ConfigFile>) -> ConfigFinder {
         Box::new(move |_, _| fallback.dupe()),
         Box::new(|| {}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_search_roots_preserve_protected_prefix_and_library_roles() {
+        let roots = ["/workspace", "/search/0", "/search/1", "/search/2"].map(PathBuf::from);
+        for count in [1, 2, 4] {
+            let mut config = ConfigFile::default();
+            configure_search_roots(&mut config, &roots, Some(count)).unwrap();
+            assert_eq!(config.search_path_from_args, roots[..count]);
+            assert_eq!(
+                config.python_environment.site_package_path.as_deref(),
+                Some(&roots[count..]),
+            );
+            assert!(config.typeshed_path.is_none());
+        }
+    }
+
+    #[test]
+    fn configured_search_roots_keep_legacy_all_explicit_behavior() {
+        let roots = ["/workspace", "/search/0"].map(PathBuf::from);
+        let mut config = ConfigFile::default();
+        let previous_libraries = config.python_environment.site_package_path.clone();
+        configure_search_roots(&mut config, &roots, None).unwrap();
+        assert_eq!(config.search_path_from_args, roots);
+        assert_eq!(
+            config.python_environment.site_package_path,
+            previous_libraries
+        );
+    }
+
+    #[test]
+    fn configured_search_roots_reject_invalid_boundaries_without_mutation() {
+        let roots = ["/workspace", "/search/0"].map(PathBuf::from);
+        for count in [0, 3, 33, usize::MAX] {
+            let mut config = ConfigFile::default();
+            let result = configure_search_roots(&mut config, &roots, Some(count));
+            assert_eq!(result.unwrap_err().code, -32602);
+            assert!(config.search_path_from_args.is_empty());
+        }
+        assert!(configure_search_roots(&mut ConfigFile::default(), &[], None).is_err());
+    }
 }
 
 pub(super) fn local_path(uri: &Url) -> Result<PathBuf, ResponseError> {
