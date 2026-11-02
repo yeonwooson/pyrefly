@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use crate::lsp::non_wasm::protocol::Response;
 use crate::test::tsp::tsp_interaction::object_model::TspInteraction;
+use crate::test::tsp::tsp_interaction::object_model::get_current_snapshot;
 
 #[test]
 fn test_tsp_get_snapshot() {
@@ -184,15 +185,12 @@ y = 'updated'
     // Wait for any RecheckFinished events triggered by the change
     tsp.client.expect_any_message();
 
-    // Get updated snapshot
-    tsp.server.get_snapshot();
-
-    // Expect second snapshot response - should be incremented due to didChange
-    tsp.client.expect_response(Response {
-        id: RequestId::from(3),
-        result: Some(serde_json::json!(2)),
-        error: None,
-    });
+    // Editor events and committed filesystem aliases can both move the opaque snapshot.
+    let updated = get_current_snapshot(&mut tsp, 3);
+    assert_ne!(
+        updated, 1,
+        "didChange must invalidate the previous snapshot"
+    );
 
     tsp.shutdown();
 }

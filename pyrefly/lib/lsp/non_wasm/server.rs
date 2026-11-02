@@ -3291,11 +3291,11 @@ impl Server {
     ) -> Vec<Handle> {
         let validate_start = Instant::now();
         let handles = self.get_open_file_handles();
-        transaction.set_memory(
+        transaction.set_memory_snapshot(
             self.open_files
                 .read()
                 .iter()
-                .map(|x| (x.0.clone(), Some(Arc::new(x.1.to_file_contents()))))
+                .map(|x| (x.0.clone(), Arc::new(x.1.to_file_contents())))
                 .collect::<Vec<_>>(),
         );
         transaction.run(&handles, Require::Everything, custom_thread_pool);
