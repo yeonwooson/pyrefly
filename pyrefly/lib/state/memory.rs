@@ -52,4 +52,44 @@ impl<'a> MemoryFilesLookup<'a> {
             None => self.base.0.get(path),
         }
     }
+
+    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        let overlay = &self.overlay.0;
+        self.base
+            .0
+            .keys()
+            .filter(move |path| !overlay.contains_key(*path))
+            .chain(
+                overlay
+                    .iter()
+                    .filter_map(|(path, contents)| contents.as_ref().map(|_| path)),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_paths_hide_removed_unsaved_dependency() {
+        let open = PathBuf::from("open.py");
+        let closed = PathBuf::from("closed.py");
+        let added = PathBuf::from("added.py");
+        let contents = Arc::new(FileContents::from_source("value = 1\n".to_owned()));
+        let mut initial = MemoryFilesOverlay::default();
+        initial.set(open.clone(), Some(contents.clone()));
+        initial.set(closed.clone(), Some(contents.clone()));
+        let mut base = MemoryFiles::default();
+        base.apply_overlay(initial);
+        let mut overlay = MemoryFilesOverlay::default();
+        overlay.set(open.clone(), Some(contents.clone()));
+        overlay.set(closed.clone(), None);
+        overlay.set(added.clone(), Some(contents));
+        let lookup = MemoryFilesLookup::new(&base, &overlay);
+        let mut paths = lookup.paths().cloned().collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(paths, vec![added, open]);
+        assert!(lookup.get(&closed).is_none());
+    }
 }

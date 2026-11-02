@@ -16,9 +16,8 @@ impl<T: TspInterface> TspServer<T> {
     /// Get the current snapshot version
     ///
     /// The snapshot changes whenever the answers of queries can change: after
-    /// an open, an edit, or a close, and after a commit that changes what
-    /// Pyrefly reads from outside the editor, such as a file on disk or the
-    /// configuration.
+    /// an open, an edit, or a close, and after a commit that changes
+    /// query-visible filesystem aliases or configuration.
     ///
     /// The snapshot is the sum of two counters that only grow: the open-file
     /// events of this server and `TspInterface::generation`. The protocol

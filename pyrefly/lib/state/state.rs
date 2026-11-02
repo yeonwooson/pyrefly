@@ -2578,14 +2578,36 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Called if the `load_from_memory` portion of loading might have changed.
+    /// Synchronize a complete authoritative set of in-memory files.
+    /// Omitted files are removed even when the readable base still contains them.
+    pub fn set_memory_snapshot(&mut self, files: Vec<(PathBuf, Arc<FileContents>)>) {
+        let present = files
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<SmallSet<_>>();
+        let mut updates = self
+            .memory_lookup()
+            .paths()
+            .filter(|path| !present.contains(*path))
+            .map(|path| (path.clone(), None))
+            .collect::<Vec<_>>();
+        updates.extend(
+            files
+                .into_iter()
+                .map(|(path, contents)| (path, Some(contents))),
+        );
+        self.set_memory(updates);
+    }
+
+    /// Called if the in-memory overlay used by source loading might have changed.
     /// Specify which in-memory files might have changed, use None to say they don't exist anymore.
     pub fn set_memory(&mut self, files: Vec<(PathBuf, Option<Arc<FileContents>>)>) {
         let mut changed = SmallSet::new();
         for (path, contents) in files {
             if self.memory_lookup().get(&path) != contents.as_ref() {
                 self.data.memory_overlay.set(path.clone(), contents);
-                changed.insert(ModulePath::memory(path));
+                // Both cached source aliases must observe the same open buffer.
+                changed.insert(ModulePath::filesystem(path));
             }
         }
         self.stats.lock().set_memory_dirty = changed.len();
@@ -2593,7 +2615,7 @@ impl<'a> Transaction<'a> {
             return;
         }
         self.invalidate(
-            |handle| changed.contains(handle.path()),
+            |handle| changed.contains(&handle.path().to_key_eq()),
             |state| state.set_dirty_load(),
         );
     }
@@ -3892,5 +3914,327 @@ impl State {
             .transaction
             .run(handles, require, custom_thread_pool);
         self.commit_transaction(transaction, telemetry);
+    }
+}
+
+#[cfg(test)]
+mod cached_alias_state_tests {
+    use std::fs;
+
+    use pyrefly_build::source_db::map_db::MapDatabase;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn test_memory_snapshot_removes_closed_unsaved_dependency() {
+        let mut config = ConfigFile::default();
+        config.python_environment.set_empty_to_default();
+        config.interpreters.skip_interpreter_query = true;
+        config.configure();
+        let state = State::new(
+            ConfigFinder::new_constant(ArcId::new(config)),
+            ThreadCount::Inline,
+        );
+        let open = PathBuf::from("open.py");
+        let closed = PathBuf::from("closed.py");
+        let contents = |source: &str| Arc::new(FileContents::from_source(source.to_owned()));
+        let dirty = contents("value = \"still dirty\"\n");
+        let mut initial = state.new_committable_transaction(Require::Exports, None);
+        initial.as_mut().set_memory(vec![
+            (open.clone(), Some(contents("value = 1\n"))),
+            (closed.clone(), Some(contents("closed = \"unsaved\"\n"))),
+        ]);
+        state.commit_transaction(initial, None);
+
+        let mut view = state.new_transaction(Require::Exports, None);
+        view.set_memory_snapshot(vec![(open.clone(), dirty.clone())]);
+        assert!(view.memory_lookup().get(&closed).is_none());
+        assert_eq!(view.memory_lookup().get(&open), Some(&dirty));
+        view.set_memory_snapshot(vec![(open.clone(), dirty.clone())]);
+        assert_eq!(view.stats.lock().set_memory_dirty, 0);
+        drop(view);
+
+        // A new view must reapply removals after a different base commits.
+        let mut older = state.new_committable_transaction(Require::Exports, None);
+        older
+            .as_mut()
+            .set_memory(vec![(open.clone(), Some(dirty.clone()))]);
+        state.commit_transaction(older, None);
+        let mut fresh = state.new_transaction(Require::Exports, None);
+        fresh.set_memory_snapshot(vec![(open.clone(), dirty.clone())]);
+        assert!(fresh.memory_lookup().get(&closed).is_none());
+        let reopened = contents("closed = 3.0\n");
+        fresh.set_memory_snapshot(vec![
+            (open.clone(), dirty.clone()),
+            (closed.clone(), reopened.clone()),
+        ]);
+        assert_eq!(fresh.memory_lookup().get(&closed), Some(&reopened));
+        fresh.set_memory_snapshot(vec![(open.clone(), dirty.clone())]);
+        assert!(fresh.memory_lookup().get(&closed).is_none());
+        drop(fresh);
+
+        let mut committed = state.new_committable_transaction(Require::Exports, None);
+        committed
+            .as_mut()
+            .set_memory_snapshot(vec![(open.clone(), dirty.clone())]);
+        state.commit_transaction(committed, None);
+        let view = state.new_transaction(Require::Exports, None);
+        assert!(view.memory_lookup().get(&closed).is_none());
+        assert_eq!(view.memory_lookup().get(&open), Some(&dirty));
+    }
+
+    fn flags(state: &ModuleState) -> [bool; 4] {
+        [
+            state.dirty.load(),
+            state.dirty.find(),
+            state.dirty.deps(),
+            state.dirty.require(),
+        ]
+    }
+
+    fn record(phase: &str, alias: &str, state: &ModuleState, queued: bool, baseline: &Arc<Load>) {
+        let load = state.steps.load.as_ref().unwrap();
+        eprintln!(
+            "CACHED_ALIAS_STATE {}",
+            json!({
+                "phase": phase,
+                "alias": alias,
+                "flags_load_find_deps_require": flags(state),
+                "queued": queued,
+                "source": load.module_info.contents().as_str(),
+                "same_load_as_baseline": Arc::ptr_eq(load, baseline),
+                "last_step": format!("{:?}", state.steps.last_step),
+            })
+        );
+    }
+
+    /// Unsaved edits refresh both cached aliases without reloading unrelated sources.
+    #[test]
+    fn test_cached_filesystem_alias_tracks_unsaved_dependency() {
+        const OLD: &str = "def label() -> int:\n    return 1\n";
+        const NEW: &str = "def label() -> str:\n    return \"changed\"\n";
+        let directory = TempDir::new().unwrap();
+        let dependency_path = directory.path().join("dependency.py");
+        let main_path = directory.path().join("main.py");
+        fs::write(&dependency_path, OLD).unwrap();
+        let mut config = ConfigFile::default();
+        config.python_environment.set_empty_to_default();
+        config.interpreters.skip_interpreter_query = true;
+        let sys_info = config.get_sys_info();
+        let filesystem = Handle::new(
+            ModuleName::from_str("dependency"),
+            ModulePath::filesystem(dependency_path.clone()),
+            sys_info.dupe(),
+        );
+        let memory = Handle::new(
+            ModuleName::from_str("dependency"),
+            ModulePath::memory(dependency_path.clone()),
+            sys_info.dupe(),
+        );
+        let main = Handle::new(
+            ModuleName::from_str("main"),
+            ModulePath::memory(main_path.clone()),
+            sys_info.dupe(),
+        );
+        let mut source_db = MapDatabase::new(sys_info);
+        source_db.insert(main.module(), main.path().dupe());
+        source_db.insert(filesystem.module(), filesystem.path().dupe());
+        config.source_db = Some(ArcId::new(Box::new(source_db)));
+        config.configure();
+        let state = State::new(
+            ConfigFinder::new_constant(ArcId::new(config)),
+            ThreadCount::Inline,
+        );
+        let roots = [main.dupe(), memory.dupe()];
+        let mut initial = state.new_committable_transaction(Require::Everything, None);
+        initial.as_mut().set_memory(vec![
+            (
+                main_path,
+                Some(Arc::new(FileContents::from_source(
+                    "from dependency import label\nvalue = label()\n".to_owned(),
+                ))),
+            ),
+            (
+                dependency_path.clone(),
+                Some(Arc::new(FileContents::from_source(OLD.to_owned()))),
+            ),
+        ]);
+        initial.as_mut().run(&roots, Require::Everything, None);
+        state.commit_transaction(initial, None);
+        let (filesystem_before, memory_before, unrelated, unrelated_load) = {
+            let committed = state.state.read();
+            assert!(committed.modules[&main].deps.contains_key(&filesystem));
+            assert_eq!(filesystem.path().as_path(), memory.path().as_path());
+            let (unrelated, module) = committed
+                .modules
+                .iter()
+                .find(|(handle, _)| handle.module().as_str() == "builtins")
+                .expect("solving annotations caches builtins");
+            (
+                committed.modules[&filesystem].state.clone(),
+                committed.modules[&memory].state.clone(),
+                unrelated.dupe(),
+                module.state.steps.load.as_ref().unwrap().clone(),
+            )
+        };
+        let filesystem_load = filesystem_before.steps.load.as_ref().unwrap().clone();
+        let memory_load = memory_before.steps.load.as_ref().unwrap().clone();
+        for module in [&filesystem_before, &memory_before] {
+            assert_eq!(flags(module), [false; 4]);
+            assert_eq!(module.steps.last_step, Some(Step::Solutions));
+            assert_eq!(
+                module
+                    .steps
+                    .load
+                    .as_ref()
+                    .unwrap()
+                    .module_info
+                    .contents()
+                    .as_str(),
+                OLD
+            );
+        }
+        record(
+            "before_edit",
+            "FileSystem",
+            &filesystem_before,
+            false,
+            &filesystem_load,
+        );
+        record("before_edit", "Memory", &memory_before, false, &memory_load);
+        eprintln!(
+            "CACHED_ALIAS_STATE {}",
+            json!({"phase": "fixture", "dependency_edge_to_filesystem": true,
+                "same_underlying_path": true, "path": dependency_path})
+        );
+
+        let mut unchanged = state.new_transaction(Require::Everything, None);
+        unchanged.set_memory(vec![(
+            dependency_path.clone(),
+            Some(Arc::new(FileContents::from_source(OLD.to_owned()))),
+        )]);
+        assert!(unchanged.data.dirty.lock().is_empty());
+        assert!(unchanged.data.updated_modules.get(&filesystem).is_none());
+        assert!(unchanged.data.updated_modules.get(&memory).is_none());
+        assert_eq!(unchanged.stats.lock().set_memory_dirty, 0);
+        drop(unchanged);
+
+        let changed = Arc::new(FileContents::from_source(NEW.to_owned()));
+        let mut transaction = state.new_transaction(Require::Everything, None);
+        transaction.set_memory(vec![(dependency_path.clone(), Some(changed.clone()))]);
+        assert_eq!(
+            transaction.memory_lookup().get(&dependency_path),
+            Some(&changed)
+        );
+        let queued: SmallSet<Handle> = transaction
+            .data
+            .dirty
+            .lock()
+            .iter()
+            .map(|module| module.handle.dupe())
+            .collect();
+        assert_eq!(queued.len(), 2);
+        assert!(queued.contains(&memory));
+        assert!(queued.contains(&filesystem));
+        assert!(!queued.contains(&unrelated));
+        assert!(transaction.data.updated_modules.get(&filesystem).is_some());
+        assert!(transaction.data.updated_modules.get(&unrelated).is_none());
+        assert_eq!(transaction.stats.lock().set_memory_dirty, 1);
+        let mut checkpoint: HashMap<Handle, ModuleState> = transaction
+            .readable
+            .modules
+            .iter()
+            .map(|(handle, module)| (handle.dupe(), module.state.clone()))
+            .collect();
+        // Consume this uncommitted checkpoint to read atomic dirty flags without
+        // clearing them in a transaction that will subsequently execute.
+        let Transaction { data, readable, .. } = transaction;
+        drop(readable);
+        assert!(data.todo.is_empty());
+        assert!(data.changed.lock().is_empty());
+        drop(data.todo);
+        drop(data.changed);
+        drop(data.dirty);
+        for (handle, module) in data.updated_modules {
+            let module = module.into_inner().expect("checkpoint owns each module");
+            checkpoint.insert(handle, module.state.take_and_freeze());
+        }
+        assert_eq!(flags(&checkpoint[&filesystem]), [true, false, false, false]);
+        assert_eq!(flags(&checkpoint[&memory]), [true, false, false, false]);
+        record(
+            "after_set_memory",
+            "FileSystem",
+            &checkpoint[&filesystem],
+            true,
+            &filesystem_load,
+        );
+        record(
+            "after_set_memory",
+            "Memory",
+            &checkpoint[&memory],
+            true,
+            &memory_load,
+        );
+
+        // Repeat the same edit from the unchanged committed baseline for the run.
+        let mut update = state.new_committable_transaction(Require::Everything, None);
+        let _ = update.as_mut().get_module(&filesystem);
+        assert!(
+            update
+                .transaction
+                .data
+                .updated_modules
+                .get(&filesystem)
+                .is_some()
+        );
+        update
+            .as_mut()
+            .set_memory(vec![(dependency_path.clone(), Some(changed))]);
+        update.as_mut().run(&roots, Require::Everything, None);
+        let reads = update
+            .transaction
+            .timing
+            .total_read_count
+            .load(Ordering::Relaxed);
+        assert!(update.transaction.data.dirty.lock().is_empty());
+        state.commit_transaction(update, None);
+        let committed = state.state.read();
+        let filesystem_after = &committed.modules[&filesystem].state;
+        let memory_after = &committed.modules[&memory].state;
+        record(
+            "after_run",
+            "FileSystem",
+            filesystem_after,
+            false,
+            &filesystem_load,
+        );
+        record("after_run", "Memory", memory_after, false, &memory_load);
+        assert_eq!(flags(filesystem_after), [false; 4]);
+        assert_eq!(flags(memory_after), [false; 4]);
+        let filesystem_after_load = filesystem_after.steps.load.as_ref().unwrap();
+        let memory_after_load = memory_after.steps.load.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(filesystem_after_load, &filesystem_load));
+        assert!(!Arc::ptr_eq(memory_after_load, &memory_load));
+        assert_eq!(filesystem_after_load.module_info.contents().as_str(), NEW);
+        assert_eq!(memory_after_load.module_info.contents().as_str(), NEW);
+        assert!(Arc::ptr_eq(
+            committed.modules[&unrelated]
+                .state
+                .steps
+                .load
+                .as_ref()
+                .unwrap(),
+            &unrelated_load,
+        ));
+        assert_eq!(fs::read_to_string(&dependency_path).unwrap(), OLD);
+        assert_eq!(reads, 0);
+        eprintln!(
+            "CACHED_ALIAS_STATE {}",
+            json!({"phase": "run_counters", "filesystem_reads": reads,
+                "filesystem_load_reused": false, "memory_load_replaced": true,
+                "disk_remained_old": true})
+        );
     }
 }

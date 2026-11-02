@@ -89,13 +89,20 @@ pub struct Load {
 
 impl Load {
     /// Return the code for this module, optional notebook cell mapping, and whether there was an error while loading (a self-error).
+    /// Open buffers override filesystem sources until their overlay is removed.
     pub fn load_from_path(
         path: &ModulePath,
         memory_lookup: &MemoryFilesLookup,
         timing: Option<&TransactionTimingCounters>,
     ) -> (FileContents, Option<anyhow::Error>) {
         let res = match path.details() {
-            ModulePathDetails::FileSystem(path) => Self::load_from_filesystem(path, timing),
+            ModulePathDetails::FileSystem(path) => {
+                if let Some(contents) = memory_lookup.get(path) {
+                    Ok(contents.as_ref().dupe())
+                } else {
+                    Self::load_from_filesystem(path, timing)
+                }
+            }
             ModulePathDetails::Namespace(_) => Ok(FileContents::from_source("".to_owned())),
             ModulePathDetails::Memory(path) => memory_lookup
                 .get(path)

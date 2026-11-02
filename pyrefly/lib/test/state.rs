@@ -54,6 +54,10 @@ use crate::module::finder::FindImportOptions;
 use crate::module::finder::find_import;
 use crate::module::typeshed::typeshed;
 use crate::state::load::FileContents;
+use crate::state::load::Load;
+use crate::state::memory::MemoryFiles;
+use crate::state::memory::MemoryFilesLookup;
+use crate::state::memory::MemoryFilesOverlay;
 use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
@@ -96,6 +100,45 @@ fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
         ErrorKind::FallbackSearchPathRelativeImport
     );
     assert!(errors[0].msg().contains("module search path"));
+}
+
+#[test]
+fn test_filesystem_load_uses_unsaved_dependency_overlay() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("dependency.py");
+    let disk = "def label() -> int:\n    return 1\n";
+    let changed =
+        FileContents::from_source("def label() -> str:\n    return \"changed\"\n".to_owned());
+    fs::write(&path, disk).unwrap();
+    let memory = MemoryFiles::default();
+    let mut overlay = MemoryFilesOverlay::default();
+    overlay.set(path.clone(), Some(Arc::new(changed.clone())));
+    let lookup = MemoryFilesLookup::new(&memory, &overlay);
+    let (open, open_error) = Load::load_from_path(&ModulePath::memory(path.clone()), &lookup, None);
+    let (imported, imported_error) =
+        Load::load_from_path(&ModulePath::filesystem(path.clone()), &lookup, None);
+    assert!(open_error.is_none() && imported_error.is_none());
+    assert_eq!(open, changed);
+    assert_eq!(fs::read_to_string(&path).unwrap(), disk);
+    assert_eq!(
+        imported, changed,
+        "An imported filesystem alias must use the same unsaved contents as the open module"
+    );
+    let updated_disk = "def label() -> float:\n    return 1.0\n";
+    fs::write(&path, updated_disk).unwrap();
+    let (still_open, error) =
+        Load::load_from_path(&ModulePath::filesystem(path.clone()), &lookup, None);
+    assert!(error.is_none());
+    assert_eq!(still_open, changed);
+    overlay.set(path.clone(), None);
+    let lookup = MemoryFilesLookup::new(&memory, &overlay);
+    let (closed, error) =
+        Load::load_from_path(&ModulePath::filesystem(path.clone()), &lookup, None);
+    assert!(error.is_none());
+    assert_eq!(closed, FileContents::from_source(updated_disk.to_owned()));
+    fs::remove_file(&path).unwrap();
+    let (_, error) = Load::load_from_path(&ModulePath::filesystem(path), &lookup, None);
+    assert!(error.is_some());
 }
 
 #[derive(Debug)]

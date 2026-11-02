@@ -8,6 +8,7 @@
 //! Integration tests for the `typeServer/getDeclaredType`,
 //! `typeServer/getComputedType`, and `typeServer/getExpectedType` TSP requests.
 
+use lsp_server::ErrorCode;
 use lsp_types::Uri;
 use tempfile::TempDir;
 use tsp_types::TypeKind;
@@ -168,6 +169,89 @@ fn get_expected_type_ok(
     let result = resp.result.expect("Expected result");
     assert!(!result.is_null(), "Expected non-null type result");
     result
+}
+
+#[test]
+fn test_tsp_computed_type_tracks_unsaved_dependency() {
+    let directory = TempDir::new().unwrap();
+    write_pyproject(directory.path());
+    let dependency = directory.path().join("dependency.py");
+    let importer = directory.path().join("main.py");
+    let disk = "def label() -> int:\n    return 1\n";
+    let changed = "def label() -> str:\n    return \"changed\"\n";
+    std::fs::write(&dependency, disk).unwrap();
+    std::fs::write(&importer, "from dependency import label\nvalue = label()\n").unwrap();
+    let importer_uri = Uri::from_file_path(&importer).unwrap().to_string();
+    let dependency_uri = Uri::from_file_path(&dependency).unwrap().to_string();
+    let mut tsp = TspInteraction::new();
+    tsp.set_root(directory.path().to_path_buf());
+    tsp.initialize(Default::default());
+    tsp.server.did_open("main.py");
+    let snapshot = get_current_snapshot(&mut tsp, 2);
+    let initial = get_computed_type_ok(&mut tsp, &importer_uri, 1, 0, snapshot);
+    assert_eq!(initial["declaration"]["name"], "int");
+
+    tsp.server.did_open("dependency.py");
+    tsp.server.did_change("dependency.py", changed, 2);
+    tsp.server.did_change("dependency.py", changed, 3);
+    let snapshot = get_current_snapshot(&mut tsp, 4);
+    let local = get_computed_type_ok(&mut tsp, &dependency_uri, 0, 4, snapshot);
+    assert_eq!(local["returnType"]["declaration"]["name"], "str");
+    assert_eq!(std::fs::read_to_string(&dependency).unwrap(), disk);
+    let imported = get_computed_type_ok(&mut tsp, &importer_uri, 1, 0, snapshot);
+    assert_eq!(imported["declaration"]["name"], "str");
+
+    tsp.server.did_change(
+        "main.py",
+        "from dependency import label\nvalue = label()\nmarker = \"still dirty\"\n",
+        2,
+    );
+    tsp.server.did_close("dependency.py");
+    let restored = get_computed_type_at_current_snapshot(&mut tsp, &importer_uri, 1, 0);
+    assert_eq!(restored["declaration"]["name"], "int");
+    let marker = get_computed_type_at_current_snapshot(&mut tsp, &importer_uri, 2, 0);
+    assert_eq!(marker["declaration"]["name"], "str");
+    assert_eq!(
+        std::fs::read_to_string(&importer).unwrap(),
+        "from dependency import label\nvalue = label()\n"
+    );
+    tsp.server.did_open("dependency.py");
+    tsp.server.did_change(
+        "dependency.py",
+        "def label() -> float:\n    return 3.0\n",
+        2,
+    );
+    let reopened = get_computed_type_at_current_snapshot(&mut tsp, &importer_uri, 1, 0);
+    assert_eq!(reopened["declaration"]["name"], "float");
+    tsp.shutdown();
+}
+
+fn get_computed_type_at_current_snapshot(
+    tsp: &mut TspInteraction,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> serde_json::Value {
+    for _ in 0..8 {
+        tsp.server.get_snapshot();
+        let response = tsp.client.receive_response_skip_notifications();
+        assert!(response.error.is_none());
+        let snapshot = serde_json::from_value(response.result.unwrap()).unwrap();
+        tsp.server.get_computed_type(uri, line, character, snapshot);
+        let response = tsp.client.receive_response_skip_notifications();
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == ErrorCode::ServerCancelled as i32)
+        {
+            continue;
+        }
+        assert!(response.error.is_none(), "{response:?}");
+        let result = response.result.unwrap();
+        assert!(!result.is_null());
+        return result;
+    }
+    panic!("current-snapshot type query was repeatedly cancelled");
 }
 
 // =======================================================================
