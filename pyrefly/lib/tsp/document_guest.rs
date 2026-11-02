@@ -77,8 +77,12 @@ pub struct DocumentGuest {
 }
 
 impl DocumentGuest {
-    pub fn new(root: Option<Url>, options: Option<Value>) -> Result<Self, ResponseError> {
-        let mut inner = QueryGuest::new(root, options)?;
+    pub fn new(
+        root: Option<Url>,
+        options: Option<Value>,
+        explicit_root_count: Option<usize>,
+    ) -> Result<Self, ResponseError> {
+        let mut inner = QueryGuest::new(root, options, explicit_root_count)?;
         inner.state.use_filesystem_overlays();
         Ok(Self {
             inner,
@@ -131,8 +135,7 @@ impl DocumentGuest {
         let path = local_path(uri)?;
         let captured = self
             .inner
-            .config
-            .search_path_from_args
+            .captured_roots
             .iter()
             .any(|root| path.starts_with(root));
         if !(captured || (stdlib_query && path.starts_with("/typeshed")))
@@ -158,11 +161,7 @@ impl DocumentGuest {
     }
 
     fn is_configured_root(&self, path: &Path) -> bool {
-        self.inner
-            .config
-            .search_path_from_args
-            .iter()
-            .any(|root| path == root)
+        self.inner.captured_roots.iter().any(|root| path == root)
     }
 
     fn check_budget(&self, path: &Path, source: &str) -> Result<(), ResponseError> {
@@ -652,8 +651,7 @@ impl DocumentGuest {
         if !path.starts_with("/typeshed")
             && !self
                 .inner
-                .config
-                .search_path_from_args
+                .captured_roots
                 .iter()
                 .any(|root| path.starts_with(root))
         {
@@ -675,10 +673,8 @@ impl DocumentGuest {
         if !self.is_configured_root(&path) {
             self.checked_source_path(&uri, true)?;
         }
-        let mut paths = self
-            .inner
-            .config
-            .search_path_from_args
+        let start = self.inner.explicit_root_count.unwrap_or(0);
+        let mut paths = self.inner.captured_roots[start..]
             .iter()
             .map(|path| {
                 Url::from_file_path(path)
