@@ -60,8 +60,8 @@ pub fn internal_error(detail: &str) -> ResponseError {
 /// Parse a URI string, rejecting only malformed/unparseable input.
 ///
 /// Returns the parsed [`Uri`] for any valid URI regardless of scheme.
-/// Use this when the handler can resolve non-file URIs (e.g. notebook
-/// cell URIs) via [`TspInterface::resolve_uri_to_path`].
+/// The caller determines which schemes it can resolve, including notebook
+/// cell URIs.
 pub fn parse_uri(uri: &str) -> Result<Uri, ResponseError> {
     Uri::parse(uri).map_err(|_| invalid_params_error("URI is not valid"))
 }
@@ -164,5 +164,58 @@ mod tests {
     fn test_parse_uri_untitled() {
         let url = parse_uri("untitled:Untitled-1").unwrap();
         assert_eq!(url.scheme(), "untitled");
+    }
+
+    #[test]
+    fn test_canonical_error_shape() {
+        for (error, code, message) in [
+            (invalid_params_error("x"), -32602, "Invalid params: x"),
+            (internal_error("x"), -32603, "Internal error: x"),
+        ] {
+            assert_eq!(error.code, code);
+            assert_eq!(error.message, message);
+            assert!(error.data.is_none());
+        }
+    }
+
+    #[test]
+    fn test_snapshot_error_boundary_values() {
+        for (client, server) in [(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)] {
+            let error = snapshot_outdated_error(client, server);
+            assert_eq!(error.code, -32802);
+            assert_eq!(
+                error.message,
+                format!("Snapshot outdated: client sent {client}, server is at {server}")
+            );
+            assert!(error.data.is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_uri_preserves_scheme_and_components() {
+        for (value, scheme) in [
+            ("file:///workspace/a%20b.py", "file"),
+            ("file:///workspace/a.py?version=1#cursor", "file"),
+            (
+                "vscode-notebook-cell:/workspace/test.ipynb#cell",
+                "vscode-notebook-cell",
+            ),
+            ("untitled:Untitled-1", "untitled"),
+            ("https://example.com/source.py", "https"),
+        ] {
+            let uri = parse_uri(value).unwrap();
+            assert_eq!(uri.scheme(), scheme);
+            assert_eq!(uri.to_string(), value);
+        }
+    }
+
+    #[test]
+    fn test_parse_uri_invalid_error_shape() {
+        for value in ["", "relative/path.py"] {
+            let error = parse_uri(value).unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert_eq!(error.message, "Invalid params: URI is not valid");
+            assert!(error.data.is_none());
+        }
     }
 }

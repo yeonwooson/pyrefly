@@ -7,10 +7,11 @@
 
 //! Internal TSP support shared by the native server and WASI hosts.
 //!
-//! The Rust interface is unstable; only transport-independent type conversion
-//! is available on WASI. The browser (`wasm32-unknown-unknown`) build does not
-//! expose this module.
+//! The Rust interface is unstable. Transport-independent type conversion,
+//! validation, and import-name resolution are available on WASI. The browser
+//! (`wasm32-unknown-unknown`) build does not expose this module.
 
+pub mod import_name;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod requests;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,7 +19,6 @@ pub(crate) mod server;
 pub(crate) mod type_conversion;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod type_facts;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod validation;
+pub mod validation;
 
 pub use type_conversion::convert_type_in_transaction;

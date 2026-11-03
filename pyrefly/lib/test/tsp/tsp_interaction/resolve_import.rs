@@ -169,3 +169,79 @@ fn test_resolve_import_stale_snapshot() {
 
     tsp.shutdown();
 }
+
+#[test]
+fn test_resolve_import_relative_context() {
+    for (source_file, relative_path) in [
+        ("__init__.py", "pkg/__init__.py"),
+        ("main.py", "pkg/main.py"),
+    ] {
+        let temp_dir = TempDir::new().unwrap();
+        write_pyproject(temp_dir.path());
+        let package = temp_dir.path().join("pkg");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("__init__.py"), "").unwrap();
+        std::fs::write(package.join("main.py"), "").unwrap();
+        let helper = package.join("helper.py");
+        std::fs::write(&helper, "value = 1\n").unwrap();
+
+        let mut tsp = TspInteraction::new();
+        tsp.set_root(temp_dir.path().to_path_buf());
+        tsp.initialize(Default::default());
+        tsp.server.did_open(relative_path);
+        tsp.client.expect_any_message();
+        let snapshot = get_current_snapshot(&mut tsp, 2);
+
+        let source_uri = Uri::from_file_path(package.join(source_file))
+            .unwrap()
+            .to_string();
+        tsp.server
+            .resolve_import(&source_uri, vec!["helper"], 1, snapshot);
+        let response = tsp.client.receive_response_skip_notifications();
+        assert!(response.error.is_none(), "{response:?}");
+        let expected = Uri::from_file_path(helper.canonicalize().unwrap())
+            .unwrap()
+            .to_string();
+        assert_eq!(response.result, Some(serde_json::json!(expected)));
+        tsp.shutdown();
+    }
+}
+
+#[test]
+fn test_resolve_import_invalid_descriptor_error_shape() {
+    let temp_dir = TempDir::new().unwrap();
+    write_pyproject(temp_dir.path());
+    let source = temp_dir.path().join("main.py");
+    std::fs::write(&source, "").unwrap();
+
+    let mut tsp = TspInteraction::new();
+    tsp.set_root(temp_dir.path().to_path_buf());
+    tsp.initialize(Default::default());
+    tsp.server.did_open("main.py");
+    tsp.client.expect_any_message();
+    let snapshot = get_current_snapshot(&mut tsp, 2);
+    let source_uri = Uri::from_file_path(source).unwrap().to_string();
+
+    for (parts, dots, message) in [
+        (
+            vec![],
+            0,
+            "Invalid params: nameParts must be non-empty for absolute imports",
+        ),
+        (
+            vec!["helper"],
+            -1,
+            "Invalid params: leadingDots must be non-negative",
+        ),
+    ] {
+        tsp.server
+            .resolve_import(&source_uri, parts, dots, snapshot);
+        let response = tsp.client.receive_response_skip_notifications();
+        assert!(response.result.is_none(), "{response:?}");
+        let error = response.error.unwrap();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, message);
+        assert!(error.data.is_none());
+    }
+    tsp.shutdown();
+}
