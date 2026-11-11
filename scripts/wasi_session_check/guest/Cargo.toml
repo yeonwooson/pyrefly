@@ -1,0 +1,27 @@
+[package]
+name = "filesystem-tsp-session-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyrefly = { path = "../../../pyrefly" }
+pyrefly_config = { path = "../../../crates/pyrefly_config" }
+pyrefly_util = { path = "../../../crates/pyrefly_util" }
+tsp_types = { path = "../../../crates/tsp_types" }
+lsp-server = "0.10.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[patch.crates-io]
+backtrace = { git = "https://github.com/rust-lang/backtrace-rs", rev = "df979dcf80027eb047d7bb9e0874710c15009f31" }
+
+[profile.dev]
+debug = 0
+incremental = false
