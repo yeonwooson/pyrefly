@@ -74,10 +74,8 @@ function seedSource(revision) {
   return `from typing import Literal\nseed: Literal[${revision}] = ${revision}\n`;
 }
 
-/** Use the same guest, filesystem and mailbox in both placements. */
-async function runGuest({ module, inbox, files, placement }, emit) {
-  const state = new Int32Array(inbox, 0, 2);
-  const data = new Uint8Array(inbox, 8);
+/** All hosts use the same public in-memory filesystem and WASI imports. */
+export function createGuestWasi(files, emit) {
   const output = (kind) => {
     const fd = new OpenFile(new File(new Uint8Array()));
     fd.fd_write = (bytes) => {
@@ -86,7 +84,7 @@ async function runGuest({ module, inbox, files, placement }, emit) {
     };
     return fd;
   };
-  const wasi = new WASI(
+  return new WASI(
     ["pyrefly-wasi-query"],
     [],
     [
@@ -100,6 +98,13 @@ async function runGuest({ module, inbox, files, placement }, emit) {
     ],
     { debug: false }
   );
+}
+
+/** Use the same guest, filesystem and mailbox in both placements. */
+async function runGuest({ module, inbox, files, placement }, emit) {
+  const state = new Int32Array(inbox, 0, 2);
+  const data = new Uint8Array(inbox, 8);
+  const wasi = createGuestWasi(files, emit);
   const originalRead = wasi.wasiImport.fd_read;
   const read = (fd, iovs, count, nread) => {
     if (fd !== 0) return originalRead(fd, iovs, count, nread);

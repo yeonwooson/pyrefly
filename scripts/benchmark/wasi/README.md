@@ -1,16 +1,108 @@
 # Pyrefly WASI benchmarks
 
-This suite provides two separate comparisons using one public guest build,
-fixture generator, framed protocol, and in-memory WASI runtime:
+This suite provides separate comparisons using a shared public Rust document
+engine, fixture generator, and in-memory WASI runtime:
 
 | Command                | Question                                                                                | Workload                              |
 | ---------------------- | --------------------------------------------------------------------------------------- | ------------------------------------- |
 | `npm run bench`        | Worker versus main-thread JSPI: does placement affect latency or driving-thread stalls? | Exact fresh types after unsaved edits |
 | `npm run bench:native` | How does normal native Pyrefly compare with the WASI Worker, including OS resources?    | Unchanged saved-file type queries     |
+| `npm run bench:direct` | Does calling exported Wasm functions help versus command JSPI and native process TSP?   | Saved queries and own-document edits  |
 
 Run npm commands with `--prefix scripts/benchmark/wasi` from the repository root.
-Results from the two comparisons have different workloads and timing boundaries;
+Results from the comparisons have different workloads and timing boundaries;
 do not combine their distributions.
+
+## Direct Wasm functions versus command JSPI versus native RPC
+
+This experimental comparison has three arms:
+
+- **direct-wasm:** a WASIp1 Rust `cdylib` on the driving JavaScript thread. JavaScript
+  allocates an instance-owned input buffer, copies JSON parameters, calls an
+  exported function such as `direct_query()`, and reads its JSON result.
+  There is no guest Worker, JSON-RPC envelope, Content-Length framing,
+  stdin/stdout request loop, or JSPI wrapper on this path.
+- **command-jspi:** the existing WASI command on that same driving thread. It
+  retains framed TSP JSON-RPC over in-memory stdin/stdout, and uses JSPI to
+  suspend at empty stdin reads.
+- **native-rpc:** normal native Pyrefly in a separate process, with its normal
+  thread count and TSP stdio interface.
+
+The exported library reuses `DocumentGuest`; it does not introduce another type checker
+or change the TSP protocol. It exposes initialize, open, change, snapshot,
+computed-type query, protocol-version query, and dispose operations. Input and
+output buffers are bounded at 1 MiB. Invalid input, stale snapshots, diagnostics,
+guest traps, and failed updates are explicit failures; updates poison the
+session on rejection, matching the command guest.
+
+Rust's built library exports `direct_initialize`, which creates the document
+session, but no command `_start` or separate C-runtime `_initialize` function.
+The standard WASI shim binds the instance and would run `_initialize` if one
+were present; no command loop or synthetic startup function is added.
+
+The direct ABI **still encodes JSON, allocates memory, and copies bytes**. It is
+not a zero-copy or typed component interface. The command and reactor share
+engine/session code but are different compiled artifacts. Native Pyrefly uses a
+different dispatcher, thread model and disk filesystem. These results compare
+the three architectures; they do not isolate process overhead, establish a
+pure Wasm slowdown, or imply production readiness.
+
+Use the prerequisites below and run:
+
+```sh
+npm run bench:direct --prefix scripts/benchmark/wasi
+npm run bench:direct --prefix scripts/benchmark/wasi -- --blocks 1 --samples 2 --edits 1 --size 3
+```
+
+The runner builds all three release artifacts from the locked source. It does
+not accept prebuilt-artifact overrides. Defaults are three rotating blocks,
+24 warm queries, four edits and 20 imported modules (22 Python files) per
+session. Two verified warmups precede warm measurements. Each block contains
+all arms, rotating the starting arm to reduce order bias. Hosts are fresh;
+the Node process and compiled Wasm modules are shared, so JIT/cache effects and
+host contention remain limitations.
+
+Every query requires the exact `Literal[revision]` builtin integer type and an
+instance flag, not just a successful response. Edits change only the entry
+document's unsaved declaration, require a newer snapshot, and require the exact
+new literal. Imported files are byte-identical across arms. This does **not**
+qualify native cross-module unsaved-edit freshness. Native edits are
+notifications, command edits have request acknowledgments, and direct edits
+are function calls; edit-to-type includes those actual submission differences.
+
+Raw results retain all samples, warmups, failures, notifications, session
+order, fixture/stdlib/artifact hashes and tool versions in a fresh
+`target/direct-call-*/results.json` directory. `--output <fresh-directory>`
+selects another location. Failed sessions are retained in denominators, never
+retried until correct or assigned successful timings.
+
+- **Warm/first query:** snapshot plus computed-type request and result decoding.
+  Exact semantic assertions follow the request clock.
+- **Edit:** change plus snapshot plus computed-type sequence.
+- **Event-loop delay:** the same 10 ms driving-thread heartbeat used by the
+  placement comparison, including the first subsequent drain tick, outside
+  the request timer. OS scheduling and host load also affect this measurement.
+- **Startup:** Wasm compilation is recorded separately and shared between
+  sessions; host creation, initialization, open submission/acknowledgment,
+  launch-to-first-correct result and orderly shutdown are recorded. Startup
+  and shutdown also have driving-thread heartbeat probes. Their final drain
+  ticks are outside the launch/shutdown clocks.
+
+Neither direct synchronous Wasm nor JSPI can preempt Rust CPU work. Request
+timeouts are event-loop deadlines, not hard interruption. Do not select a
+main-thread production path from request medians alone.
+
+Run the ABI integration tests against the reactor built by the runner:
+
+```powershell
+$env:PYREFLY_DIRECT_WASM = '<Cargo target directory>\wasm32-wasip1\release\examples\pyrefly_wasi_direct.wasm'
+npm test --prefix scripts\benchmark\wasi
+```
+
+The two real-reactor tests are explicitly skipped without this path. They must
+run, not skip, when qualifying direct-call results. They exercise actual Wasm
+exports, invalid UTF-8/buffer limits, initialization, fresh edits, stale
+snapshots, poisoned updates, disposal, and rejection after host closure.
 
 ## Worker versus main-thread JSPI
 
@@ -118,7 +210,7 @@ npm run bench:native --prefix scripts/benchmark/wasi -- --output target/native-w
 npm run bench:native --prefix scripts/benchmark/wasi -- --output target/native-wasi-unsampled --no-sample
 ```
 
-`CARGO_TARGET_DIR` is honored by both comparisons. Repeated commands reuse the
+`CARGO_TARGET_DIR` is honored by all comparisons. Repeated commands reuse the
 normal Cargo cache but still validate/build their own outputs; there are no
 external binary overrides. Use a fresh output directory for each attempt.
 Suite source hashes are frozen before building and checked again before and
