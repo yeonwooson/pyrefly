@@ -172,7 +172,7 @@ export function assertAnswer(type) {
   assert.equal(decodeURIComponent(uri.pathname).split("/").at(-1), "builtins.pyi");
 }
 
-async function treeHash(root, excluded = new Set()) {
+export async function treeHash(root, excluded = new Set()) {
   const entries = [];
   const visit = async (relative) => {
     const names = await readdir(path.join(root, relative), { withFileTypes: true });

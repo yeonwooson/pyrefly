@@ -5,7 +5,8 @@
   "scripts": {
     "bench": "node --experimental-wasm-jspi benchmark.mjs",
     "bench:native": "node native.mjs",
-    "test": "node --experimental-wasm-jspi --test benchmark.test.mjs native.test.mjs",
+    "bench:direct": "node --experimental-wasm-jspi direct.mjs",
+    "test": "node --experimental-wasm-jspi --test benchmark.test.mjs native.test.mjs direct.test.mjs",
     "test:resources": "python resources_test.py"
   },
   "dependencies": {

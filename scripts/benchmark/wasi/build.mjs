@@ -29,7 +29,7 @@ export async function suiteHashes() {
 }
 
 /** Both comparisons build the same locked release guest using the public SDK. */
-export async function buildArtifacts(includeNative = false) {
+export async function buildArtifacts(includeNative = false, includeDirect = false) {
   const sdk = process.env.WASI_SDK_PATH;
   assert(sdk && path.isAbsolute(sdk), "Set WASI_SDK_PATH to an absolute public WASI SDK installation path");
   const extension = process.platform === "win32" ? ".exe" : "";
@@ -52,6 +52,13 @@ export async function buildArtifacts(includeNative = false) {
     ["build", "--locked", "--release", "--target", "wasm32-wasip1", "--bin", "pyrefly-wasi-query"],
     { cwd: ROOT, env, stdio: "inherit" }
   );
+  if (includeDirect) {
+    execFileSync(
+      "cargo",
+      ["build", "--locked", "--release", "--target", "wasm32-wasip1", "--example", "pyrefly-wasi-direct"],
+      { cwd: ROOT, env, stdio: "inherit" }
+    );
+  }
   const metadata = JSON.parse(command("cargo", ["metadata", "--no-deps", "--format-version", "1"]));
   const wasm = path.join(metadata.target_directory, "wasm32-wasip1", "release", "pyrefly-wasi-query.wasm");
   return {
@@ -59,6 +66,7 @@ export async function buildArtifacts(includeNative = false) {
     bytes: await readFile(wasm),
     native: path.join(metadata.target_directory, "release", `pyrefly${extension}`),
     exporter: path.join(metadata.target_directory, "release", `pyrefly-wasi-query${extension}`),
+    direct: path.join(metadata.target_directory, "wasm32-wasip1", "release", "examples", "pyrefly_wasi_direct.wasm"),
     tools: {
       rustc: command(process.env.RUSTC || "rustc", ["--version"]),
       cargo: command("cargo", ["--version"]),
